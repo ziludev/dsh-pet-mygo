@@ -6,7 +6,11 @@
   <style>
     html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
     #stage { position: relative; width: 100%; height: 100%; }
-    video { position: absolute; inset: 0; width: 100%; height: 100%; }
+    video {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      opacity: 0; transition: opacity 0.16s ease;
+    }
+    video.visible { opacity: 1; }
     #bubble {
       position: absolute;
       left: 50%;
@@ -37,32 +41,58 @@
 </head>
 <body>
   <div id="stage">
-    <video autoplay muted playsinline loop></video>
+    <video id="v0" autoplay muted playsinline></video>
+    <video id="v1" autoplay muted playsinline></video>
     <div id="bubble"></div>
   </div>
   <script>
     const BASE = "http://127.0.0.1:3080/dsh-pet-7340";
     const IDLE = "待机呼吸休闲";
-    const video = document.querySelector("video");
+    const layers = [document.getElementById("v0"), document.getElementById("v1")];
     const bubble = document.getElementById("bubble");
 
-    let current = "";
+    let active = 0;      // index of the visible layer
     let sayTimer = null;
 
-    function src(name) {
-      return "anim/" + encodeURIComponent(name) + ".mov";
-    }
+    const src = (name) => "anim/" + encodeURIComponent(name) + ".mov";
 
+    // Cross-fade to an animation: load it on the back layer, then fade in over
+    // the current one, so switching never flashes black.
     function play(name) {
-      if (name === current) { video.play(); return; }
-      current = name;
-      video.loop = name === IDLE;
-      video.src = src(name);
-      video.play().catch(() => {});
+      const next = 1 - active;
+      const inV = layers[next], outV = layers[active];
+
+      if (inV.dataset.name === name && inV.src) {
+        inV.classList.add("visible");
+        outV.classList.remove("visible");
+        inV.play().catch(() => {});
+        active = next;
+        return;
+      }
+
+      inV.dataset.name = name;
+      inV.loop = name === IDLE;
+      inV.src = src(name);
+      inV.play().then(() => {
+        inV.classList.add("visible");
+        outV.classList.remove("visible");
+        // Reclaim the outgoing layer once the fade ends, unless it holds the
+        // idle loop (keep it warm for a cheap switch back).
+        const old = outV;
+        if (old.dataset.name !== IDLE) {
+          setTimeout(() => {
+            old.pause();
+            old.removeAttribute("src");
+            old.load();
+            delete old.dataset.name;
+          }, 220);
+        }
+        active = next;
+      }).catch(() => {});
     }
 
     // Event animations run once, then fall back to the idle loop.
-    video.addEventListener("ended", () => { if (current !== IDLE) play(IDLE); });
+    layers.forEach((el) => el.addEventListener("ended", () => play(IDLE)));
 
     function say(text, duration) {
       bubble.textContent = text;
