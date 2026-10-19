@@ -28,17 +28,45 @@ import (
 const (
 	listenAddr = "127.0.0.1:3080"
 	idleAnim   = "待机呼吸休闲"
-	windowW    = 640
-	windowH    = 360
+	baseW      = 640 // animation canvas
+	baseH      = 360
 	animDir    = "resources/anim"
 
-	// petHit* is the pet body region (in canvas coords) that should capture
-	// the mouse; everything else in the window passes clicks through.
+	// petHit* is the pet body region (in canvas coords) used as the fallback
+	// click-through box; everything else in the window passes clicks through.
 	petHitMinX = 196
 	petHitMinY = 60
 	petHitMaxX = 447
 	petHitMaxY = 331
 )
+
+// windowW/H and the fallback hit box are derived from the config scale at
+// startup (see applyScale), so the whole canvas scales together.
+var (
+	windowW = baseW
+	windowH = baseH
+	hitMinX = petHitMinX
+	hitMinY = petHitMinY
+	hitMaxX = petHitMaxX
+	hitMaxY = petHitMaxY
+)
+
+// applyScale sizes the window (and the fallback hit box) to the canvas times
+// the config scale, clamped to a sane range.
+func applyScale(size float64) {
+	if size < 0.3 {
+		size = 0.3
+	}
+	if size > 2 {
+		size = 2
+	}
+	windowW = int(float64(baseW) * size)
+	windowH = int(float64(baseH) * size)
+	hitMinX = int(float64(petHitMinX) * size)
+	hitMinY = int(float64(petHitMinY) * size)
+	hitMaxX = int(float64(petHitMaxX) * size)
+	hitMaxY = int(float64(petHitMaxY) * size)
+}
 
 // workStatusAnims is the animation pool for the six work-status tiers, in the
 // same order dsh-pet uses (and the same names as resources/anim/*.mov).
@@ -222,6 +250,7 @@ var defaultPets = []petConfig{
 // appConfig is the on-disk user config (~/.config/dsh-pet-mygo/config.json).
 // Edit it (or drag the pet, which persists its position) and restart.
 type appConfig struct {
+	Size float64     `json:"size"` // overall pet scale, 1 = native canvas (640x360)
 	Pets []petConfig `json:"pets"`
 }
 
@@ -240,7 +269,7 @@ func configPath() string {
 // loadConfig reads the user config, falling back to defaults. On first run it
 // writes a default file so the user has something to edit.
 func loadConfig() appConfig {
-	cfg := appConfig{Pets: defaultPets}
+	cfg := appConfig{Size: 1, Pets: defaultPets}
 	data, err := os.ReadFile(configPath())
 	if err != nil {
 		saveConfig(cfg)
@@ -248,7 +277,10 @@ func loadConfig() appConfig {
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil || len(cfg.Pets) == 0 {
 		log.Printf("config %s invalid, using defaults", configPath())
-		cfg = appConfig{Pets: defaultPets}
+		cfg = appConfig{Size: 1, Pets: defaultPets}
+	}
+	if cfg.Size <= 0 {
+		cfg.Size = 1
 	}
 	return cfg
 }
@@ -322,7 +354,7 @@ type server struct {
 }
 
 func newServer() *server {
-	return &server{
+	s := &server{
 		pets:      map[string]*petState{"main": newPetState()},
 		windows:   map[string]*mygo.Window{},
 		winPet:    map[*mygo.Window]string{},
@@ -333,6 +365,8 @@ func newServer() *server {
 		cfg:       loadConfig(),
 		hitBox:    map[string][4]int{},
 	}
+	applyScale(s.cfg.Size)
+	return s
 }
 
 // addWindow registers a window for a pet, seeds its state, and remembers its
@@ -943,7 +977,7 @@ func (s *server) clickThroughLoop(id string) {
 		menuOpen := s.menuOpen[win]
 		hb, hasHB := s.hitBox[id]
 		s.mu.Unlock()
-		minX, minY, maxX, maxY := petHitMinX, petHitMinY, petHitMaxX, petHitMaxY
+		minX, minY, maxX, maxY := hitMinX, hitMinY, hitMaxX, hitMaxY
 		if hasHB {
 			minX, minY, maxX, maxY = hb[0], hb[1], hb[2], hb[3]
 		}
