@@ -196,6 +196,7 @@ type server struct {
 	petHome   map[string][2]int     // pet id -> initial (x, y)
 	menuOpen  map[*mygo.Window]bool // right-click menu open per window
 	cfg       appConfig             // loaded user config; positions persisted back
+	hitBox    map[string][4]int     // pet id -> current animation's opaque bbox
 }
 
 func newServer() *server {
@@ -208,6 +209,7 @@ func newServer() *server {
 		petHome:   map[string][2]int{},
 		menuOpen:  map[*mygo.Window]bool{},
 		cfg:       loadConfig(),
+		hitBox:    map[string][4]int{},
 	}
 }
 
@@ -678,6 +680,19 @@ func (p *Pet) SetMenuOpen(ctx context.Context, open bool) {
 	p.server.mu.Unlock()
 }
 
+// SetHitBox tells the click-through loop the pet's opaque region for the
+// current animation (canvas coords), so the transparent margin passes clicks
+// through instead of the fixed fallback box.
+func (p *Pet) SetHitBox(ctx context.Context, minX, minY, maxX, maxY int) {
+	w := mygo.CallerWindow(ctx)
+	s := p.server
+	s.mu.Lock()
+	if id := s.winPet[w]; id != "" {
+		s.hitBox[id] = [4]int{minX, minY, maxX, maxY}
+	}
+	s.mu.Unlock()
+}
+
 // Fling throws the calling window with an initial velocity (px/s), from a drag
 // release.
 func (p *Pet) Fling(ctx context.Context, vx, vy float64) {
@@ -699,11 +714,16 @@ func (s *server) clickThroughLoop(id string) {
 	for {
 		wx, wy := win.Position()
 		cur := mygo.Screen.CursorScreenPoint()
-		inPet := cur.X >= wx+petHitMinX && cur.X <= wx+petHitMaxX &&
-			cur.Y >= wy+petHitMinY && cur.Y <= wy+petHitMaxY
 		s.mu.Lock()
 		menuOpen := s.menuOpen[win]
+		hb, hasHB := s.hitBox[id]
 		s.mu.Unlock()
+		minX, minY, maxX, maxY := petHitMinX, petHitMinY, petHitMaxX, petHitMaxY
+		if hasHB {
+			minX, minY, maxX, maxY = hb[0], hb[1], hb[2], hb[3]
+		}
+		inPet := cur.X >= wx+minX && cur.X <= wx+maxX &&
+			cur.Y >= wy+minY && cur.Y <= wy+maxY
 		wantIgnore := !(inPet || menuOpen)
 		if wantIgnore != ignoring {
 			win.SetIgnoreMouseEvents(wantIgnore)
@@ -914,8 +934,12 @@ func main() {
 	}()
 
 	mygo.App.WhenReady(func() {
+		wa := mygo.Screen.PrimaryDisplay().WorkArea
 		for _, pc := range s.cfg.Pets {
 			pc := pc
+			// Keep a restored position on screen, even if the config was edited.
+			pc.X = min(max(pc.X, wa.X), wa.X+wa.Width-windowW)
+			pc.Y = min(max(pc.Y, wa.Y), wa.Y+wa.Height-windowH)
 			win := mygo.NewWindow(mygo.WindowOptions{
 				Title:         "dsh-pet",
 				Width:         windowW,
