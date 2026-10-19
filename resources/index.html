@@ -104,18 +104,8 @@
     const petEl = document.getElementById("pet");
     const layers = [document.getElementById("v0"), document.getElementById("v1")];
 
-    // The pet's body region within the 640x360 canvas (union across animations).
-    // The window is smaller, so we scale the canvas so the pet fills it,
-    // reserving a strip at the top for the speech bubble.
-    const PET_BBOX = { x: 196, y: 60, w: 252, h: 272 };
-    const BUBBLE_SPACE = 44;
-    function fitPet() {
-      const s = Math.min(stage.clientWidth / PET_BBOX.w, (stage.clientHeight - BUBBLE_SPACE) / PET_BBOX.h);
-      const dx = -PET_BBOX.x * s;
-      const dy = -PET_BBOX.y * s + BUBBLE_SPACE;
-      viewport.style.transform = `translate(${dx}px, ${dy}px) scale(${s})`;
-    }
-    fitPet();
+    // The window matches the 640x360 canvas 1:1 (click-through handles the
+    // transparent margin), so no scaling is applied here.
     const bubble = document.getElementById("bubble");
 
     let active = 0;      // index of the visible layer
@@ -333,9 +323,13 @@
       menu.style.display = "block";
       menu.style.left = Math.min(x, stage.clientWidth - menu.offsetWidth - 8) + "px";
       menu.style.top = Math.min(y, stage.clientHeight - menu.offsetHeight - 8) + "px";
+      mygo.call("Pet.SetMenuOpen", true);
     }
 
-    function hideMenu() { menu.style.display = "none"; }
+    function hideMenu() {
+      menu.style.display = "none";
+      mygo.call("Pet.SetMenuOpen", false);
+    }
 
     stage.addEventListener("contextmenu", (e) => {
       e.preventDefault();

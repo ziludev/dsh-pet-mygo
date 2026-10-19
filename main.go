@@ -23,9 +23,16 @@ import (
 const (
 	listenAddr = "127.0.0.1:3080"
 	idleAnim   = "待机呼吸休闲"
-	windowW    = 280
-	windowH    = 340
+	windowW    = 640
+	windowH    = 360
 	animDir    = "resources/anim"
+
+	// petHit* is the pet body region (in canvas coords) that should capture
+	// the mouse; everything else in the window passes clicks through.
+	petHitMinX = 196
+	petHitMinY = 60
+	petHitMaxX = 447
+	petHitMaxY = 331
 )
 
 // workStatusAnims is the animation pool for the six work-status tiers, in the
@@ -136,7 +143,8 @@ type server struct {
 	winPet    map[*mygo.Window]string // window -> pet id
 	dragGen   map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
 	playbacks map[string]*playback
-	petHome   map[string][2]int // pet id -> initial (x, y)
+	petHome   map[string][2]int     // pet id -> initial (x, y)
+	menuOpen  map[*mygo.Window]bool // right-click menu open per window
 }
 
 func newServer() *server {
@@ -147,6 +155,7 @@ func newServer() *server {
 		dragGen:   map[*mygo.Window]int64{},
 		playbacks: map[string]*playback{},
 		petHome:   map[string][2]int{},
+		menuOpen:  map[*mygo.Window]bool{},
 	}
 }
 
@@ -608,11 +617,49 @@ func (p *Pet) Home(ctx context.Context) {
 	w.SetPosition(home[0], home[1])
 }
 
+// SetMenuOpen tells the click-through loop the right-click menu is open, so
+// the whole window keeps receiving the mouse while the user picks an item.
+func (p *Pet) SetMenuOpen(ctx context.Context, open bool) {
+	w := mygo.CallerWindow(ctx)
+	p.server.mu.Lock()
+	p.server.menuOpen[w] = open
+	p.server.mu.Unlock()
+}
+
 // Fling throws the calling window with an initial velocity (px/s), from a drag
 // release.
 func (p *Pet) Fling(ctx context.Context, vx, vy float64) {
 	log.Printf("fling vx=%.0f vy=%.0f", vx, vy)
 	p.server.fling(mygo.CallerWindow(ctx), vx, vy)
+}
+
+// clickThroughLoop makes the window ignore the mouse everywhere except over
+// the pet's body, so the transparent margin never blocks clicks on windows
+// underneath. It polls the cursor (the window cannot see mouse moves while it
+// ignores them) and flips SetIgnoreMouseEvents only on a state change.
+func (s *server) clickThroughLoop(id string) {
+	win := s.windowFor(id)
+	if win == nil {
+		return
+	}
+	ignoring := true
+	win.SetIgnoreMouseEvents(true)
+	for {
+		wx, wy := win.Position()
+		cur := mygo.Screen.CursorScreenPoint()
+		inPet := cur.X >= wx+petHitMinX && cur.X <= wx+petHitMaxX &&
+			cur.Y >= wy+petHitMinY && cur.Y <= wy+petHitMaxY
+		s.mu.Lock()
+		menuOpen := s.menuOpen[win]
+		s.mu.Unlock()
+		wantIgnore := !(inPet || menuOpen)
+		if wantIgnore != ignoring {
+			win.SetIgnoreMouseEvents(wantIgnore)
+			ignoring = wantIgnore
+			log.Printf("click-through %s -> ignore=%v", id, ignoring)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
 }
 
 func (s *server) handler() http.Handler {
@@ -796,6 +843,7 @@ func main() {
 			}
 			go s.animChain(pc.ID)
 			go s.whisperLoop(pc.ID)
+			go s.clickThroughLoop(pc.ID)
 		}
 	})
 	if err := mygo.App.Run(); err != nil {
