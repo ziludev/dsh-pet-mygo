@@ -47,7 +47,6 @@ type petConfig struct {
 
 var defaultPets = []petConfig{
 	{ID: "main", X: 700, Y: 220},
-	{ID: "side", X: 980, Y: 420},
 }
 
 // field mirrors dsh-pet's state leaf: { counter, data }. The counter is a
