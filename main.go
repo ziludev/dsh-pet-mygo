@@ -60,8 +60,18 @@ type field struct {
 
 // petState is the per-pet slice of /state the bridge extension reads.
 type petState struct {
-	Say  field `json:"say"`
-	Anim field `json:"anim"`
+	Say    field `json:"say"`
+	Anim   field `json:"anim"`
+	Facing field `json:"facing"` // "left" or "right"; the page mirrors the video on left
+}
+
+// newPetState returns a pet's initial state.
+func newPetState() *petState {
+	return &petState{
+		Anim:   field{Counter: 0, Data: map[string]any{"name": idleAnim}},
+		Say:    field{Counter: 0, Data: nil},
+		Facing: field{Counter: 0, Data: "right"},
+	}
 }
 
 type fullState struct {
@@ -78,12 +88,8 @@ type server struct {
 }
 
 func newServer() *server {
-	p := &petState{
-		Anim: field{Counter: 0, Data: map[string]any{"name": idleAnim}},
-		Say:  field{Counter: 0, Data: nil},
-	}
 	return &server{
-		pets:    map[string]*petState{"main": p},
+		pets:    map[string]*petState{"main": newPetState()},
 		windows: map[string]*mygo.Window{},
 		winPet:  map[*mygo.Window]string{},
 		dragGen: map[*mygo.Window]int64{},
@@ -97,10 +103,7 @@ func (s *server) addWindow(id string, w *mygo.Window) {
 	s.windows[id] = w
 	s.winPet[w] = id
 	if s.pets[id] == nil {
-		s.pets[id] = &petState{
-			Anim: field{Counter: 0, Data: map[string]any{"name": idleAnim}},
-			Say:  field{Counter: 0, Data: nil},
-		}
+		s.pets[id] = newPetState()
 	}
 }
 
@@ -115,10 +118,7 @@ func (s *server) pet(id string) *petState {
 	defer s.mu.Unlock()
 	p := s.pets[id]
 	if p == nil {
-		p = &petState{
-			Anim: field{Counter: 0, Data: map[string]any{"name": idleAnim}},
-			Say:  field{Counter: 0, Data: nil},
-		}
+		p = newPetState()
 		s.pets[id] = p
 	}
 	return p
@@ -139,12 +139,18 @@ func (s *server) setSay(id, text string, duration int) {
 	log.Printf("say %s -> %q", id, text)
 }
 
+func (s *server) setFacing(id, facing string) {
+	p := s.pet(id)
+	p.Facing = field{Counter: time.Now().UnixMilli(), Data: facing}
+	log.Printf("facing %s -> %s", id, facing)
+}
+
 func (s *server) state() fullState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pets := make(map[string]petState, len(s.pets))
 	for id, p := range s.pets {
-		pets[id] = petState{Say: p.Say, Anim: p.Anim}
+		pets[id] = petState{Say: p.Say, Anim: p.Anim, Facing: p.Facing}
 	}
 	return fullState{
 		// Sections exist for shape-compatibility; this port has no balance or
@@ -291,6 +297,11 @@ func (s *server) roam(id string) {
 	}
 	dist := 60 + rand.Intn(maxDist-60+1)
 
+	facing := "right"
+	if dir < 0 {
+		facing = "left"
+	}
+	s.setFacing(id, facing)
 	s.setAnim(id, roamAnims[rand.Intn(len(roamAnims))])
 	gen := s.beginMove(win)
 

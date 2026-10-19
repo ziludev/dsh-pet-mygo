@@ -14,7 +14,7 @@
     #stage.dragging { cursor: grabbing; }
     video {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      opacity: 0; transition: opacity 0.16s ease;
+      opacity: 0; transition: opacity 0.16s ease, transform 0.2s ease;
       pointer-events: none;
     }
     video.visible { opacity: 1; }
@@ -104,6 +104,12 @@
     // Event animations run once, then fall back to the idle loop.
     layers.forEach((el) => el.addEventListener("ended", () => play(IDLE)));
 
+    // Mirror the video when the pet faces left.
+    function setFacing(f) {
+      const flip = f === "left";
+      layers.forEach((v) => { v.style.transform = flip ? "scaleX(-1)" : ""; });
+    }
+
     function say(text, duration) {
       bubble.textContent = text;
       bubble.style.display = "block";
@@ -184,6 +190,7 @@
     // ---- state polling -----------------------------------------------
     let lastAnimCounter = -1;
     let lastSayCounter = -1;
+    let lastFacingCounter = -1;
 
     async function poll() {
       try {
@@ -198,6 +205,10 @@
           if (pet.say && pet.say.data && pet.say.counter !== lastSayCounter) {
             lastSayCounter = pet.say.counter;
             say(pet.say.data.text, pet.say.data.duration);
+          }
+          if (pet.facing && pet.facing.data && pet.facing.counter !== lastFacingCounter) {
+            lastFacingCounter = pet.facing.counter;
+            setFacing(pet.facing.data);
           }
         }
       } catch (e) { /* server not up yet */ }

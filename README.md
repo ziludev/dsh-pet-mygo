@@ -15,7 +15,8 @@ MVP 骨架，已跑通闭环：
 - **双缓冲 `<video>` 交叉淡入**：切换动画无闪黑
 - **拖拽 / 甩抛**：按住拖动窗口跟随，松手速度快则抛掷（反弹+摩擦），慢则原地放下
 - **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分窗口
-- **屏幕漫游**：idle 一段时间后随机方向行走（探到屏幕边缘不走出），播行走动画 + 窗口滑动，2 秒后回 idle
+- **屏幕漫游**：idle 后随机方向行走（探到屏幕边缘不走出），播行走动画 + 窗口滑动，回 idle
+- **朝向镜像**：朝左行走时视频水平翻转（`facing` 状态 + CSS `scaleX(-1)`）
 - `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`、
   `POST /broadcast`、`POST /position`（归一化坐标）、`POST /throw`（抛掷+反弹+摩擦），
   均按 `?pet=` 路由
@@ -70,7 +71,6 @@ ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWrit
 
 ## 下一步
 
-- 朝向镜像（朝左时动画水平翻转）
 - 补齐契约其余端点（`/playback/{id}`）
 - 从 dsh-pet Release `assets-mov` 拉全量真实素材（当前只转了 10 个）
 
