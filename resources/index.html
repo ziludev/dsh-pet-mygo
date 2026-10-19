@@ -5,10 +5,17 @@
   <title>dsh-pet</title>
   <style>
     html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
-    #stage { position: relative; width: 100%; height: 100%; }
+    #stage {
+      position: relative; width: 100%; height: 100%;
+      /* pet is a floating sprite; let clicks pass where it is transparent */
+      user-select: none; -webkit-user-select: none;
+      cursor: grab;
+    }
+    #stage.dragging { cursor: grabbing; }
     video {
       position: absolute; inset: 0; width: 100%; height: 100%;
       opacity: 0; transition: opacity 0.16s ease;
+      pointer-events: none;
     }
     video.visible { opacity: 1; }
     #bubble {
@@ -48,6 +55,8 @@
   <script>
     const BASE = "http://127.0.0.1:3080/dsh-pet-7340";
     const IDLE = "待机呼吸休闲";
+    const FLING_SPEED = 350; // px/s; drag release faster than this becomes a fling
+    const stage = document.getElementById("stage");
     const layers = [document.getElementById("v0"), document.getElementById("v1")];
     const bubble = document.getElementById("bubble");
 
@@ -101,6 +110,76 @@
       sayTimer = setTimeout(() => { bubble.style.display = "none"; }, duration || 8000);
     }
 
+    // ---- drag & fling ---------------------------------------------------
+    // Pointer position on screen (CSS px) maps 1:1 to MyGo logical coords,
+    // so the window top-left follows screenX/Y minus the grab offset.
+    let dragging = false;
+    let grabX = 0, grabY = 0;   // pointer offset within the window at grab
+    let velX = 0, velY = 0;     // low-passed release velocity, px/s
+    let lastX = 0, lastY = 0, lastT = 0;
+    let pendingX = null, pendingY = null, rafQueued = false;
+
+    function onDown(e) {
+      dragging = true;
+      stage.classList.add("dragging");
+      grabX = e.clientX;
+      grabY = e.clientY;
+      lastX = e.screenX; lastY = e.screenY; lastT = performance.now();
+      velX = velY = 0;
+      stage.setPointerCapture(e.pointerId);
+    }
+
+    function onMove(e) {
+      if (!dragging) return;
+      const now = performance.now();
+      if (now - lastT > 0) {
+        const dt = now - lastT;
+        const ivx = (e.screenX - lastX) / dt * 1000;
+        const ivy = (e.screenY - lastY) / dt * 1000;
+        velX = velX * 0.5 + ivx * 0.5;
+        velY = velY * 0.5 + ivy * 0.5;
+      }
+      lastX = e.screenX; lastY = e.screenY; lastT = now;
+
+      pendingX = Math.round(e.screenX - grabX);
+      pendingY = Math.round(e.screenY - grabY);
+      if (!rafQueued) {
+        rafQueued = true;
+        requestAnimationFrame(() => {
+          rafQueued = false;
+          if (dragging && pendingX != null) {
+            mygo.call("Pet.MoveTo", pendingX, pendingY);
+            pendingX = pendingY = null;
+          }
+        });
+      }
+    }
+
+    function onUp(e) {
+      if (!dragging) return;
+      dragging = false;
+      stage.classList.remove("dragging");
+      if (stage.hasPointerCapture(e.pointerId)) {
+        stage.releasePointerCapture(e.pointerId);
+      }
+      if (Math.hypot(velX, velY) > FLING_SPEED) {
+        mygo.call("Pet.Fling", velX, velY);
+      }
+    }
+
+    stage.addEventListener("pointerdown", onDown);
+    stage.addEventListener("pointermove", onMove);
+    stage.addEventListener("pointerup", onUp);
+    stage.addEventListener("pointercancel", onUp);
+
+    // Bridge self-check: surface a visible error if the page can't reach Go.
+    try {
+      mygo.call("Pet.Ping").catch((e) => say("bridge 失败: " + e, 6000));
+    } catch (e) {
+      say("bridge 异常: " + e, 6000);
+    }
+
+    // ---- state polling -----------------------------------------------
     let lastAnimCounter = -1;
     let lastSayCounter = -1;
 

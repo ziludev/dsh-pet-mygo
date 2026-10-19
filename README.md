@@ -13,6 +13,7 @@ MVP 骨架，已跑通闭环：
 
 - 透明、无边框、置顶、无阴影窗口，播放真实宠物动画（蓝毛小女仆）
 - **双缓冲 `<video>` 交叉淡入**：切换动画无闪黑
+- **拖拽 / 甩抛**：按住拖动窗口跟随，松手速度快则抛掷（反弹+摩擦），慢则原地放下
 - `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`、
   `POST /broadcast`、`POST /position`（归一化坐标）、`POST /throw`（抛掷+反弹+摩擦）
 - 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim} = {counter, data}`），
@@ -66,7 +67,7 @@ ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWrit
 
 ## 下一步
 
-- 多宠物 / 多窗口、拖拽 / 甩抛交互、屏幕漫游
+- 多宠物 / 多窗口、屏幕漫游（行走类动画）
 - 补齐契约其余端点（`/playback/{id}`）
 - 从 dsh-pet Release `assets-mov` 拉全量真实素材（当前只转了 7 个）
 

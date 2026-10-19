@@ -53,9 +53,10 @@ type fullState struct {
 }
 
 type server struct {
-	mu     sync.Mutex
-	pets   map[string]*petState
-	window *mygo.Window
+	mu      sync.Mutex
+	pets    map[string]*petState
+	window  *mygo.Window
+	dragGen int64 // bumped on a manual move, to cancel an in-flight fling
 }
 
 func newServer() *server {
@@ -152,19 +153,17 @@ func (s *server) move(x, y float64) {
 	win.SetPosition(int(nx), int(ny))
 }
 
-// throw flings the window: initial velocity from angle (degrees, 0 = right,
-// 90 = down) and power (multiplier), bouncing off work-area edges with friction
-// until it rests.
-func (s *server) throw(power, angleDeg float64) {
+// fling moves the window under an initial velocity (px/s), bouncing off
+// work-area edges with friction until it rests or a manual move cancels it.
+func (s *server) fling(vx, vy float64) {
 	win := s.windowPtr()
 	if win == nil {
 		return
 	}
+	s.mu.Lock()
+	gen := s.dragGen
+	s.mu.Unlock()
 	wa := mygo.Screen.PrimaryDisplay().WorkArea
-	rad := angleDeg * math.Pi / 180
-	speed := power * 2200 // px/s baseline
-	vx := speed * math.Cos(rad)
-	vy := speed * math.Sin(rad)
 
 	x, y := win.Position()
 	fx, fy := float64(x), float64(y)
@@ -175,6 +174,12 @@ func (s *server) throw(power, angleDeg float64) {
 
 	const dt = 1.0 / 60.0
 	step := func() bool {
+		s.mu.Lock()
+		cancelled := s.dragGen != gen
+		s.mu.Unlock()
+		if cancelled {
+			return true
+		}
 		fx += vx * dt
 		fy += vy * dt
 		if fx < minX {
@@ -202,6 +207,37 @@ func (s *server) throw(power, angleDeg float64) {
 		}
 		time.Sleep(16 * time.Millisecond)
 	}
+}
+
+// throw flings by angle (degrees, 0 = right, 90 = down) and power (multiplier).
+func (s *server) throw(power, angleDeg float64) {
+	rad := angleDeg * math.Pi / 180
+	speed := power * 2200
+	s.fling(speed*math.Cos(rad), speed*math.Sin(rad))
+}
+
+// Pet is the service bound to the page via mygo.Bind; the page drives window
+// drag and fling through mygo.call("Pet.MoveTo" / "Pet.Fling").
+type Pet struct{ server *server }
+
+// Ping lets the page verify the bridge is wired up.
+func (p *Pet) Ping() string { return "pong" }
+
+// MoveTo moves the window's top-left corner to a screen (logical) position.
+func (p *Pet) MoveTo(x, y int) {
+	s := p.server
+	s.mu.Lock()
+	s.dragGen++
+	s.mu.Unlock()
+	if w := s.windowPtr(); w != nil {
+		w.SetPosition(x, y)
+	}
+}
+
+// Fling throws the window with an initial velocity (px/s), from a drag release.
+func (p *Pet) Fling(vx, vy float64) {
+	log.Printf("fling vx=%.0f vy=%.0f", vx, vy)
+	p.server.fling(vx, vy)
 }
 
 func (s *server) handler() http.Handler {
@@ -320,6 +356,7 @@ func (s *server) handler() http.Handler {
 
 func main() {
 	s := newServer()
+	mygo.Bind(&Pet{server: s})
 	go func() {
 		log.Printf("serving /dsh-pet-7340 on http://%s", listenAddr)
 		if err := http.ListenAndServe(listenAddr, s.handler()); err != nil {
