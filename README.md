@@ -20,7 +20,8 @@
   实时计算（`Pet.SetHitBox`），跳跃/举手等超出默认区域的姿势也能拖、能点
 - **点击回应**：点击播 clicks 池动画 + Q 弹挤压（squish）
 - **右键菜单**：按分类点播动画、清空气泡、回到初始位置
-- **碎碎念**：周期自动弹一句 + 碎碎念动画；无模型时用内置句子池结构化降级
+- **碎碎念**：周期自动弹一句 + 碎碎念动画；句子从预生成缓存（`whispers.json`）随机取，
+  无缓存时用内置句子池降级。宠物运行时**不调模型**，批量生成一次能用很久
 - **屏幕漫游 + 朝向镜像**：朝随机方向行走不走出屏幕，朝左时视频水平翻转
 - **多显示器**：漫游与抛掷按窗口所在的显示器计算边界（`Screen.DisplayMatching`）
 - **单元测试**：12 个测试覆盖时长解析、动画链权重、契约端点、配置读写（`go test ./...`）
@@ -110,6 +111,22 @@ curl -s -X POST 'http://127.0.0.1:3080/dsh-pet-7340/broadcast?pet=main' \
 
 > 注：MyGo 创建窗口时的 `X` 在小于约 221 时会被 AppKit clamp，所以本项目在创建后用
 > `SetPosition` 显式定位，配置里的任意坐标都能生效。
+
+### 碎碎念句子（批量预生成）
+
+宠物运行时**不调模型**：句子先批量生成到 `~/.config/dsh-pet-mygo/whispers.json`，
+运行时随机取（避免连续重复），文件缺失时回退内置句子池。这样一批 ≈1k token 能用好几天。
+
+```sh
+# 用环境变量指向任意 OpenAI 兼容端点（不设则用 pi 的本地 magpie 代理）
+DSH_PET_LLM_BASE=https://api.example.com/v1 \
+DSH_PET_LLM_KEY=sk-xxx \
+DSH_PET_LLM_MODEL=gpt-4o-mini \
+./dsh-pet-mygo -generate-whispers -whisper-count 30
+
+# pi 在跑时可以直接用默认（127.0.0.1:3425 magpie）
+./dsh-pet-mygo -generate-whispers
+```
 
 ## 架构
 
