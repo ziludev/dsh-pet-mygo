@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>dsh-pet mygo probe</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+    video { display: block; width: 100%; height: 100%; }
+    /* Diagnostics: a faint red outline shows the window bounds; remove to hide */
+    body.diag { outline: 1px dashed rgba(255, 0, 0, 0.4); }
+  </style>
+</head>
+<body>
+  <video autoplay loop muted playsinline src="sample-alpha.mov"></video>
+  <script>
+    // Surface playback problems as a visible label instead of silence.
+    const v = document.querySelector('video');
+    v.addEventListener('error', () => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div style="position:fixed;left:8px;top:8px;color:red;background:white;font:12px monospace">video error</div>');
+    });
+    v.addEventListener('loadeddata', () => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div style="position:fixed;left:8px;top:8px;color:lime;font:12px monospace">playing</div>');
+    });
+  </script>
+</body>
+</html>
