@@ -17,7 +17,8 @@ MVP 骨架，已跑通闭环：
 - **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分窗口
 - **屏幕漫游**：idle 后随机方向行走（探到屏幕边缘不走出），播行走动画 + 窗口滑动，回 idle
 - **朝向镜像**：朝左行走时视频水平翻转（`facing` 状态 + CSS `scaleX(-1)`）
-- `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`、
+- `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`（回 `playbackId`）、
+  `GET /playback/{id}`（播放回执）、`POST /playback/{id}/report`、
   `POST /broadcast`、`POST /position`（归一化坐标）、`POST /throw`（抛掷+反弹+摩擦），
   均按 `?pet=` 路由
 - 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim} = {counter, data}`），
@@ -71,7 +72,6 @@ ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWrit
 
 ## 下一步
 
-- 补齐契约其余端点（`/playback/{id}`）
 - 从 dsh-pet Release `assets-mov` 拉全量真实素材（当前只转了 10 个）
 
 ## License

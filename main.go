@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -78,20 +79,32 @@ type fullState struct {
 	Pets     map[string]petState `json:"pets"`
 }
 
+// playback is the receipt for an animation command: accepted by the host,
+// then reported by the page as playing/completed/error.
+type playback struct {
+	ID      string `json:"id"`
+	Pet     string `json:"pet"`
+	Name    string `json:"name"`
+	Status  string `json:"status"` // accepted | playing | completed | error
+	Counter int64  `json:"counter"`
+}
+
 type server struct {
-	mu      sync.Mutex
-	pets    map[string]*petState
-	windows map[string]*mygo.Window   // pet id -> window
-	winPet  map[*mygo.Window]string   // window -> pet id
-	dragGen map[*mygo.Window]int64    // bumped on manual move, cancels an in-flight fling
+	mu        sync.Mutex
+	pets      map[string]*petState
+	windows   map[string]*mygo.Window // pet id -> window
+	winPet    map[*mygo.Window]string // window -> pet id
+	dragGen   map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
+	playbacks map[string]*playback
 }
 
 func newServer() *server {
 	return &server{
-		pets:    map[string]*petState{"main": newPetState()},
-		windows: map[string]*mygo.Window{},
-		winPet:  map[*mygo.Window]string{},
-		dragGen: map[*mygo.Window]int64{},
+		pets:      map[string]*petState{"main": newPetState()},
+		windows:   map[string]*mygo.Window{},
+		winPet:    map[*mygo.Window]string{},
+		dragGen:   map[*mygo.Window]int64{},
+		playbacks: map[string]*playback{},
 	}
 }
 
@@ -112,7 +125,7 @@ func (s *server) windowFor(id string) *mygo.Window {
 	return s.windows[id]
 }
 
-func (s *server) pet(id string) *petState {
+func (s *server) setAnim(id, name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.pets[id]
@@ -120,28 +133,51 @@ func (s *server) pet(id string) *petState {
 		p = newPetState()
 		s.pets[id] = p
 	}
-	return p
-}
-
-func (s *server) setAnim(id, name string) {
-	p := s.pet(id)
-	p.Anim = field{Counter: time.Now().UnixMilli(), Data: map[string]any{"name": name}}
-	log.Printf("anim %s -> %s", id, name)
+	pid := fmt.Sprintf("pb-%d", time.Now().UnixNano())
+	p.Anim = field{Counter: time.Now().UnixMilli(), Data: map[string]any{"name": name, "playbackId": pid}}
+	s.playbacks[pid] = &playback{ID: pid, Pet: id, Name: name, Status: "accepted", Counter: time.Now().UnixMilli()}
+	log.Printf("anim %s -> %s (%s)", id, name, pid)
+	return pid
 }
 
 func (s *server) setSay(id, text string, duration int) {
 	if duration <= 0 {
 		duration = 8000
 	}
-	p := s.pet(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pets[id]
+	if p == nil {
+		p = newPetState()
+		s.pets[id] = p
+	}
 	p.Say = field{Counter: time.Now().UnixMilli(), Data: map[string]any{"text": text, "duration": duration}}
 	log.Printf("say %s -> %q", id, text)
 }
 
 func (s *server) setFacing(id, facing string) {
-	p := s.pet(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pets[id]
+	if p == nil {
+		p = newPetState()
+		s.pets[id] = p
+	}
 	p.Facing = field{Counter: time.Now().UnixMilli(), Data: facing}
 	log.Printf("facing %s -> %s", id, facing)
+}
+
+// reportPlayback records a playback status reported by the rendering page.
+func (s *server) reportPlayback(id, status string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pb := s.playbacks[id]
+	if pb == nil {
+		return false
+	}
+	pb.Status = status
+	pb.Counter = time.Now().UnixMilli()
+	return true
 }
 
 func (s *server) state() fullState {
@@ -417,7 +453,34 @@ func (s *server) handler() http.Handler {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		s.setAnim(petOf(r), body.Name)
+		pid := s.setAnim(petOf(r), body.Name)
+		jsonReply(w, map[string]any{"ok": true, "playbackId": pid})
+	}))
+
+	mux.HandleFunc("/dsh-pet-7340/playback/{id}", cors(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		s.mu.Lock()
+		pb := s.playbacks[id]
+		s.mu.Unlock()
+		if pb == nil {
+			http.Error(w, "playback not found", http.StatusNotFound)
+			return
+		}
+		jsonReply(w, pb)
+	}))
+
+	mux.HandleFunc("/dsh-pet-7340/playback/{id}/report", cors(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		var body struct {
+			Status string `json:"status"`
+		}
+		if !postJSON(w, r, &body) {
+			return
+		}
+		if !s.reportPlayback(id, body.Status) {
+			http.Error(w, "playback not found", http.StatusNotFound)
+			return
+		}
 		jsonReply(w, map[string]bool{"ok": true})
 	}))
 

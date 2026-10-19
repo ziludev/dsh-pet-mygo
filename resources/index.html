@@ -63,14 +63,26 @@
     let active = 0;      // index of the visible layer
     let sayTimer = null;
     let petId = "main";  // resolved from Pet.WhoAmI once the bridge is up
+    let currentPlayback = null; // playbackId of the animation now on screen
 
     const src = (name) => "anim/" + encodeURIComponent(name) + ".mov";
 
+    // Report a playback status back to the host (receipt via GET /playback/{id}).
+    function report(playbackId, status) {
+      if (!playbackId) return;
+      fetch(BASE + "/playback/" + playbackId + "/report", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status }),
+      }).catch(() => {});
+    }
+
     // Cross-fade to an animation: load it on the back layer, then fade in over
     // the current one, so switching never flashes black.
-    function play(name) {
+    function play(name, playbackId) {
       const next = 1 - active;
       const inV = layers[next], outV = layers[active];
+      if (playbackId) currentPlayback = playbackId;
 
       if (inV.dataset.name === name && inV.src) {
         inV.classList.add("visible");
@@ -84,6 +96,7 @@
       inV.loop = name === IDLE;
       inV.src = src(name);
       inV.play().then(() => {
+        report(playbackId, "playing");
         inV.classList.add("visible");
         outV.classList.remove("visible");
         // Reclaim the outgoing layer once the fade ends, unless it holds the
@@ -102,8 +115,11 @@
     }
 
     // Event animations run once, then fall back to the idle loop.
-    layers.forEach((el) => el.addEventListener("ended", () => play(IDLE)));
-
+    layers.forEach((el) => el.addEventListener("ended", () => {
+      report(currentPlayback, "completed");
+      currentPlayback = null;
+      play(IDLE);
+    }));
     // Mirror the video when the pet faces left.
     function setFacing(f) {
       const flip = f === "left";
@@ -200,7 +216,7 @@
         if (pet) {
           if (pet.anim && pet.anim.data && pet.anim.counter !== lastAnimCounter) {
             lastAnimCounter = pet.anim.counter;
-            play(pet.anim.data.name);
+            play(pet.anim.data.name, pet.anim.data.playbackId);
           }
           if (pet.say && pet.say.data && pet.say.counter !== lastSayCounter) {
             lastSayCounter = pet.say.counter;
