@@ -6,7 +6,9 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -574,26 +576,108 @@ func (s *server) pickNext() (kind, name string) {
 	}
 }
 
-// animChain drives the idle-loop animation chain: when the pet is idle it picks
-// the next animation by weight, plays it, then returns to idle. Event and
-// interaction animations set the state out from under it, so it only advances
-// when its own animation is still the current one.
+// findAtom returns the payload of the named atom among data's top-level atoms.
+func findAtom(data []byte, name string) ([]byte, bool) {
+	off := 0
+	for off+8 <= len(data) {
+		size := uint64(binary.BigEndian.Uint32(data[off:]))
+		typ := string(data[off+4 : off+8])
+		if size == 1 {
+			if off+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[off+8:])
+		}
+		if size < 8 || off+int(size) > len(data) {
+			break
+		}
+		if typ == name {
+			// Return the payload (skip the size+type header) so nested lookup
+			// walks the child atoms, not the parent itself.
+			return data[off+8 : off+int(size)], true
+		}
+		off += int(size)
+	}
+	return nil, false
+}
+
+// movDuration reads a QuickTime movie's duration from its mvhd atom, so the
+// animation chain waits the real length instead of a fixed guess.
+func movDuration(path string) (float64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	moov, ok := findAtom(data, "moov")
+	if !ok {
+		return 0, errors.New("no moov atom")
+	}
+	mvhd, ok := findAtom(moov, "mvhd")
+	if !ok {
+		return 0, errors.New("no mvhd atom")
+	}
+	body := mvhd // already the payload: version + flags + fields
+	if len(body) < 20 {
+		return 0, errors.New("short mvhd")
+	}
+	if body[0] == 1 { // 64-bit version
+		if len(body) < 32 {
+			return 0, errors.New("short mvhd v1")
+		}
+		timescale := binary.BigEndian.Uint32(body[20:24])
+		duration := binary.BigEndian.Uint64(body[24:32])
+		if timescale == 0 {
+			return 0, errors.New("zero timescale")
+		}
+		return float64(duration) / float64(timescale), nil
+	}
+	timescale := binary.BigEndian.Uint32(body[12:16])
+	duration := binary.BigEndian.Uint32(body[16:20])
+	if timescale == 0 {
+		return 0, errors.New("zero timescale")
+	}
+	return float64(duration) / float64(timescale), nil
+}
+
+var animDurCache sync.Map // animation name -> time.Duration
+
+// animDuration returns the real playback length of an animation, falling back
+// to animPlaySec if the mov can't be read.
+func animDuration(name string) time.Duration {
+	if v, ok := animDurCache.Load(name); ok {
+		return v.(time.Duration)
+	}
+	secs, err := movDuration(filepath.Join(animDir, name+".mov"))
+	if err != nil || secs <= 0 || secs > 120 {
+		secs = float64(animPlaySec)
+	}
+	dur := time.Duration(secs * float64(time.Second))
+	animDurCache.Store(name, dur)
+	return dur
+}
+
+// animChain drives the idle-loop animation chain: the idle animation plays one
+// full cycle, then the next animation is picked by weight and played for its
+// real duration, then the pet returns to idle. Event and interaction animations
+// set the state out from under it, so it waits for idle before advancing and
+// only returns to idle if its own animation is still the current one.
 func (s *server) animChain(id string) {
 	for {
-		time.Sleep(animPlaySec * time.Second)
-		// Only advance the chain when the pet is idle — never interrupt a
-		// user-requested (menu/click) or event animation.
-		if s.animName(id) != idleAnim {
-			continue
+		// Wait until the pet is idle (a request/event animation plays out).
+		for s.animName(id) != idleAnim {
+			time.Sleep(400 * time.Millisecond)
 		}
+		// One full idle cycle.
+		time.Sleep(animDuration(idleAnim))
+
 		kind, name := s.pickNext()
-		log.Printf("chain %s -> %s %s", id, kind, name)
+		log.Printf("chain %s -> %s %s (%.1fs)", id, kind, name, animDuration(name).Seconds())
 		if kind == "move" {
 			s.roam(id)
 			continue
 		}
 		s.setAnim(id, name)
-		time.Sleep(animPlaySec * time.Second)
+		time.Sleep(animDuration(name))
 		if kind == "turn" {
 			s.toggleFacing(id)
 		}
