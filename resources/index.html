@@ -69,7 +69,7 @@
       border-radius: 8px;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.22);
       padding: 4px;
-      max-height: 340px;
+      max-height: calc(100% - 16px);
       overflow-y: auto;
       min-width: 170px;
       z-index: 10;
@@ -314,14 +314,28 @@
       menu.appendChild(menuItem("清空气泡", () => { bubble.style.display = "none"; }));
       menu.appendChild(menuItem("回到初始位置", () => { mygo.call("Pet.Home"); }));
       const sep = () => { const d = document.createElement("div"); d.className = "sep"; menu.appendChild(d); };
-      const grp = (label) => { const d = document.createElement("div"); d.className = "grp"; d.textContent = label; menu.appendChild(d); };
       sep();
       const p = animPools || { idle: [IDLE] };
       const groups = [["待机", p.idle], ["转向", p.turn], ["移动", p.moves], ["点击回应", p.clicks], ["动作", p.actions]];
+      // Categories collapse to a header so the menu fits the small window;
+      // clicking a header expands its animations inline.
       for (const [label, items] of groups) {
         if (!items || !items.length) continue;
-        grp(label);
-        for (const name of items) menu.appendChild(menuItem(name, () => pointPlay(name)));
+        const header = document.createElement("div");
+        header.className = "mi";
+        header.textContent = label + " ▸";
+        const box = document.createElement("div");
+        box.style.display = "none";
+        box.style.maxHeight = "180px";
+        box.style.overflowY = "auto";
+        for (const name of items) box.appendChild(menuItem(name, () => pointPlay(name)));
+        header.onclick = () => {
+          const open = box.style.display !== "none";
+          box.style.display = open ? "none" : "block";
+          header.textContent = label + (open ? " ▸" : " ▾");
+        };
+        menu.appendChild(header);
+        menu.appendChild(box);
       }
       menu.style.display = "block";
       menu.style.left = Math.min(x, stage.clientWidth - menu.offsetWidth - 8) + "px";
