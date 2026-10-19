@@ -24,7 +24,7 @@ const (
 	listenAddr = "127.0.0.1:3080"
 	idleAnim   = "待机呼吸休闲"
 	windowW    = 280
-	windowH    = 300
+	windowH    = 340
 	animDir    = "resources/anim"
 )
 
