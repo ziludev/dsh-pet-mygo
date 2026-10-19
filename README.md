@@ -1,58 +1,74 @@
 # dsh-pet-mygo
 
-Feasibility probe: can [MyGo](https://github.com/egoist/mygo)'s transparent,
-always-on-top, frameless window render a **HEVC-with-alpha `.mov`** transparently
-through the system webview (WKWebView on macOS)?
+[dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 的无 Electron / 无 DeepSeek Harness
+桌面端：用 [MyGo](https://github.com/egoist/mygo) 的透明置顶窗 + 系统 webview（WKWebView）
+播放 HEVC-with-alpha `.mov`，对外保持 dsh-pet 自己的 `/dsh-pet-7340` HTTP 契约。
 
-**Result: PASSED.** The solid square floats over a fully transparent window —
-no black box around it (verified by screenshotting the window and compositing
-its alpha over a checkerboard). The only follow-up for a real pet is
-`DisableShadow: true` to drop macOS's default window shadow.
+**闸门实验已通过**：MyGo 透明无边框窗能透明渲染 HEVC-alpha mov（无黑框），因此整个
+桌宠可以不依赖 116MB 的 Electron 运行。
 
-## Why this matters
+## 当前状态
 
-[dsh-pet](https://github.com/PC2005-cloud/dsh-pet) ships only VP9-alpha `.webm`,
-which WKWebView (Safari's engine) cannot decode. Its macOS path is HEVC-alpha
-`.mov`. This probe confirms the whole chain works without Electron:
+MVP 骨架，已跑通闭环：
 
-| layer | status |
-|---|---|
-| MyGo transparent frameless window | ✓ |
-| WKWebView transparent page | ✓ |
-| HEVC-with-alpha `.mov` decoding | ✓ |
-| alpha=0 regions show the desktop through | ✓ |
+- 透明、无边框、置顶、无阴影窗口，播放真实宠物动画（蓝毛小女仆）
+- `/dsh-pet-7340` 契约核心端点：`GET /state`、`POST /anim`、`POST /broadcast`
+- 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim} = {counter, data}`），
+  因此之前写的 [pi 桥接扩展](../../.pi/agent/extensions/dsh-pet.ts) **零改动**直接可用
+- 7 个 HEVC-alpha mov 素材（idle + 6 档工作状态），从 npm 包的 VP9-alpha webm 转出
 
-## Run
+## 运行
 
 ```sh
-go run .          # builds and opens the floating square
+# 先转换素材（已转好可跳过；需要 macOS + ffmpeg + Xcode CLT）
+./scripts/encode-movs.sh 待机呼吸休闲 工作状态-思考冒泡 工作状态-忙碌点按 \
+  工作状态-清点归档 工作状态-原地踱步张望 工作状态-雀跃庆祝 工作状态-垂头叹气冒汗
+
+go run .        # 监听 http://127.0.0.1:3080，窗口播放 idle 动画
 ```
 
-The window shows `resources/index.html`, which plays
-`resources/sample-alpha.mov` in a `<video>` loop.
-
-## How the sample .mov was made
-
-ffmpeg alone drops HEVC alpha (`libx265` on this machine rejects `yuva*`, and
-`hevc_videotoolbox` strips the alpha). The working path is the same one dsh-pet
-uses upstream: an Apple-native encoder.
+驱动它（与 dsh-pet / pi 桥接扩展同款调用）：
 
 ```sh
-# 1. compile dsh-pet's encoder (AVAssetWriter + hevcWithAlpha)
-xcrun swiftc -O -framework AVFoundation -framework CoreVideo -framework VideoToolbox \
-  hevc_alpha_encoder.swift -o /tmp/hevc-alpha-encoder
+curl -s -X POST 'http://127.0.0.1:3080/dsh-pet-7340/anim?pet=main' \
+  -H 'content-type: application/json' -d '{"name":"工作状态-雀跃庆祝"}'
 
-# 2. ffmpeg emits BGRA frames -> encoder writes HEVC-with-alpha mov
-ffmpeg -f lavfi -i "color=blue:size=256x256:rate=24:duration=3" \
-  -vf "format=rgba,geq=r='0':g='120':b='255':a='if(between(X,78,178)*between(Y,78,178),255,0)',format=bgra" \
-  -f rawvideo -pix_fmt bgra pipe:1 \
-  | /tmp/hevc-alpha-encoder out.mov 256 256 24
+curl -s -X POST 'http://127.0.0.1:3080/dsh-pet-7340/broadcast?pet=main' \
+  -H 'content-type: application/json' -d '{"text":"宿主骨架跑通啦","duration":6000}'
 ```
 
-`hevc_alpha_encoder.swift` is dsh-pet's, MIT-licensed
-(`scripts/hevc_alpha_encoder.swift` in the upstream repo).
+## 架构
 
-## License note
+```
+main.go                    透明窗 + /dsh-pet-7340 HTTP 服务 + 内存状态
+resources/index.html       <video> 播放 mov，轮询 /state 切换动画 + 气泡
+resources/anim/*.mov       HEVC-alpha 透明素材
+scripts/encode-movs.sh     webm(VP9-alpha) → mov(HEVC-alpha) 转码
+```
 
-dsh-pet is MIT. Reusing its assets and the shared physics logic in an
-independent (non-fork) Go project is fine as long as the MIT notice is kept.
+- 页面通过 `file://` 加载，`fetch` 到 HTTP 服务属跨域，服务端已加 CORS 头。
+- 动画名即 `resources/anim/` 下的文件名（不含扩展名）。
+
+## 素材：webm → HEVC-alpha mov
+
+WKWebView 不认 VP9-alpha（黑底），需要 HEVC-with-alpha。ffmpeg 两条路都走不通
+（`libx265` 打不开 `yuva*`，`hevc_videotoolbox` 静默丢 alpha），正确做法是复用
+dsh-pet 上游的 AVFoundation 编码器：
+
+```
+ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWriter + hevcWithAlpha) → mov
+```
+
+`hevc_alpha_encoder.swift`（dsh-pet 上游，MIT）已放在 `scripts/`，`encode-movs.sh`
+会按需用 `xcrun swiftc` 编译它。
+
+## 下一步
+
+- 双缓冲 `<video>` 交叉淡入（消除切换动画时的闪黑）
+- 多宠物 / 多窗口、拖拽 / 甩抛、屏幕漫游
+- 补齐契约其余端点（`/config`、`/playback/{id}`、`/position`、`/throw`）
+- 从 dsh-pet Release `assets-mov` 拉全量真实素材（当前只转了 7 个）
+
+## License
+
+MIT（复用 dsh-pet 素材与 `hevc_alpha_encoder.swift` 时保留其 MIT 声明）。

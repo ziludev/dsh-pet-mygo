@@ -2,27 +2,99 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>dsh-pet mygo probe</title>
+  <title>dsh-pet</title>
   <style>
     html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
-    video { display: block; width: 100%; height: 100%; }
-    /* Diagnostics: a faint red outline shows the window bounds; remove to hide */
-    body.diag { outline: 1px dashed rgba(255, 0, 0, 0.4); }
+    #stage { position: relative; width: 100%; height: 100%; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #bubble {
+      position: absolute;
+      left: 50%;
+      top: -4px;
+      transform: translateX(-50%);
+      max-width: 90%;
+      padding: 8px 14px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.95);
+      color: #333;
+      font: 14px/1.4 -apple-system, "PingFang SC", sans-serif;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+      white-space: nowrap;
+      display: none;
+      pointer-events: none;
+    }
+    #bubble::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -7px;
+      transform: translateX(-50%);
+      border: 7px solid transparent;
+      border-top-color: rgba(255, 255, 255, 0.95);
+      border-bottom: 0;
+    }
   </style>
 </head>
 <body>
-  <video autoplay loop muted playsinline src="sample-alpha.mov"></video>
+  <div id="stage">
+    <video autoplay muted playsinline loop></video>
+    <div id="bubble"></div>
+  </div>
   <script>
-    // Surface playback problems as a visible label instead of silence.
-    const v = document.querySelector('video');
-    v.addEventListener('error', () => {
-      document.body.insertAdjacentHTML('beforeend',
-        '<div style="position:fixed;left:8px;top:8px;color:red;background:white;font:12px monospace">video error</div>');
-    });
-    v.addEventListener('loadeddata', () => {
-      document.body.insertAdjacentHTML('beforeend',
-        '<div style="position:fixed;left:8px;top:8px;color:lime;font:12px monospace">playing</div>');
-    });
+    const BASE = "http://127.0.0.1:3080/dsh-pet-7340";
+    const IDLE = "待机呼吸休闲";
+    const video = document.querySelector("video");
+    const bubble = document.getElementById("bubble");
+
+    let current = "";
+    let sayTimer = null;
+
+    function src(name) {
+      return "anim/" + encodeURIComponent(name) + ".mov";
+    }
+
+    function play(name) {
+      if (name === current) { video.play(); return; }
+      current = name;
+      video.loop = name === IDLE;
+      video.src = src(name);
+      video.play().catch(() => {});
+    }
+
+    // Event animations run once, then fall back to the idle loop.
+    video.addEventListener("ended", () => { if (current !== IDLE) play(IDLE); });
+
+    function say(text, duration) {
+      bubble.textContent = text;
+      bubble.style.display = "block";
+      if (sayTimer) clearTimeout(sayTimer);
+      sayTimer = setTimeout(() => { bubble.style.display = "none"; }, duration || 8000);
+    }
+
+    let lastAnimCounter = -1;
+    let lastSayCounter = -1;
+
+    async function poll() {
+      try {
+        const r = await fetch(BASE + "/state", { cache: "no-store" });
+        const s = await r.json();
+        const pet = s.pets && s.pets.main;
+        if (pet) {
+          if (pet.anim && pet.anim.data && pet.anim.counter !== lastAnimCounter) {
+            lastAnimCounter = pet.anim.counter;
+            play(pet.anim.data.name);
+          }
+          if (pet.say && pet.say.data && pet.say.counter !== lastSayCounter) {
+            lastSayCounter = pet.say.counter;
+            say(pet.say.data.text, pet.say.data.duration);
+          }
+        }
+      } catch (e) { /* server not up yet */ }
+      setTimeout(poll, 400);
+    }
+
+    play(IDLE); // start on the idle loop; /state will switch it when commanded
+    poll();
   </script>
 </body>
 </html>
