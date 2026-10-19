@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -33,6 +34,9 @@ var workStatusAnims = []string{
 	"工作状态-雀跃庆祝",
 	"工作状态-垂头叹气冒汗",
 }
+
+// roamAnims are the walk animations played while the pet roams across screen.
+var roamAnims = []string{"螃蟹走路", "原地漂浮踏步", "原地左转奔跑"}
 
 // petConfig lists the pets to spawn; each gets its own window.
 type petConfig struct {
@@ -167,11 +171,13 @@ func (s *server) config() map[string]any {
 	}
 }
 
-// cancelFlings bumps the window's drag generation so any active fling stops.
-func (s *server) cancelFlings(w *mygo.Window) {
+// beginMove bumps the window's drag generation so any active fling or roam
+// stops, and returns the new generation for the move that's about to run.
+func (s *server) beginMove(w *mygo.Window) int64 {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.dragGen[w]++
-	s.mu.Unlock()
+	return s.dragGen[w]
 }
 
 // move places a pet's window at normalized coordinates (0..1) over the primary
@@ -181,7 +187,7 @@ func (s *server) move(id string, x, y float64) {
 	if win == nil {
 		return
 	}
-	s.cancelFlings(win)
+	s.beginMove(win)
 	wa := mygo.Screen.PrimaryDisplay().WorkArea
 	nx := float64(wa.X) + x*float64(wa.Width-windowW)
 	ny := float64(wa.Y) + y*float64(wa.Height-windowH)
@@ -192,9 +198,7 @@ func (s *server) move(id string, x, y float64) {
 // edges with friction until it rests or a manual move cancels it.
 func (s *server) fling(win *mygo.Window, vx, vy float64) {
 	wa := mygo.Screen.PrimaryDisplay().WorkArea
-	s.mu.Lock()
-	gen := s.dragGen[win]
-	s.mu.Unlock()
+	gen := s.beginMove(win)
 
 	x, y := win.Position()
 	fx, fy := float64(x), float64(y)
@@ -251,6 +255,69 @@ func (s *server) throw(id string, power, angleDeg float64) {
 	s.fling(win, speed*math.Cos(rad), speed*math.Sin(rad))
 }
 
+// roam walks a pet a short distance in a random direction, probing the work-area
+// edges so it never walks off screen. The walk animation plays while the window
+// slides, then the pet returns to idle.
+func (s *server) roam(id string) {
+	win := s.windowFor(id)
+	if win == nil {
+		return
+	}
+	wa := mygo.Screen.PrimaryDisplay().WorkArea
+	x, y := win.Position()
+
+	leftSpace := x - wa.X
+	rightSpace := (wa.X + wa.Width - windowW) - x
+	const minSpace = 200
+	var dirs []int
+	if leftSpace > minSpace {
+		dirs = append(dirs, -1)
+	}
+	if rightSpace > minSpace {
+		dirs = append(dirs, 1)
+	}
+	if len(dirs) == 0 {
+		return
+	}
+	dir := dirs[rand.Intn(len(dirs))]
+
+	room := leftSpace
+	if dir > 0 {
+		room = rightSpace
+	}
+	maxDist := room - 20
+	if maxDist < 60 {
+		maxDist = 60
+	}
+	dist := 60 + rand.Intn(maxDist-60+1)
+
+	s.setAnim(id, roamAnims[rand.Intn(len(roamAnims))])
+	gen := s.beginMove(win)
+
+	const moveDur = 2000 * time.Millisecond
+	const steps = 24
+	stepDur := moveDur / steps
+	for i := 1; i <= steps; i++ {
+		s.mu.Lock()
+		cancelled := s.dragGen[win] != gen
+		s.mu.Unlock()
+		if cancelled {
+			return
+		}
+		win.SetPosition(x+dir*dist*i/steps, y)
+		time.Sleep(stepDur)
+	}
+	s.setAnim(id, idleAnim)
+}
+
+// autoRoam periodically walks a pet while it is idle, until the process ends.
+func (s *server) autoRoam(id string) {
+	for {
+		time.Sleep(time.Duration(10+rand.Intn(10)) * time.Second)
+		s.roam(id)
+	}
+}
+
 // Pet is the service bound to each page via mygo.Bind. Bridge methods take the
 // calling window from the context, so each pet's page moves its own window.
 type Pet struct{ server *server }
@@ -272,7 +339,7 @@ func (p *Pet) WhoAmI(ctx context.Context) string {
 // MoveTo moves the calling window's top-left corner to a screen position.
 func (p *Pet) MoveTo(ctx context.Context, x, y int) {
 	w := mygo.CallerWindow(ctx)
-	p.server.cancelFlings(w)
+	p.server.beginMove(w)
 	w.SetPosition(x, y)
 }
 
@@ -426,6 +493,7 @@ func main() {
 			if err := win.Page().LoadFile("resources/index.html"); err != nil {
 				log.Fatalf("load pet page: %v", err)
 			}
+			go s.autoRoam(pc.ID)
 		}
 	})
 	if err := mygo.App.Run(); err != nil {
