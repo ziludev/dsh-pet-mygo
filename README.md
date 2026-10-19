@@ -9,21 +9,25 @@
 
 ## 当前状态
 
-MVP 骨架，已跑通闭环：
+已对齐 dsh-pet 原版桌宠核心交互：
 
 - 透明、无边框、置顶、无阴影窗口，播放真实宠物动画（蓝毛小女仆）
 - **双缓冲 `<video>` 交叉淡入**：切换动画无闪黑
+- **动画链**：idle 播完按权重（idle 10 / turn 5 / move 5 / 动作 80）自动选下一个，
+  turn 翻转朝向、move 漫游、动作从 80+ 池随机
 - **拖拽 / 甩抛**：按住拖动窗口跟随，松手速度快则抛掷（反弹+摩擦），慢则原地放下
-- **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分窗口
-- **屏幕漫游**：idle 后随机方向行走（探到屏幕边缘不走出），播行走动画 + 窗口滑动，回 idle
-- **朝向镜像**：朝左行走时视频水平翻转（`facing` 状态 + CSS `scaleX(-1)`）
+- **点击回应**：点击播 clicks 池动画 + Q 弹挤压（squish）
+- **右键菜单**：按分类点播动画、清空气泡、回到初始位置
+- **碎碎念**：周期自动弹一句 + 碎碎念动画；无模型时用内置句子池结构化降级
+- **屏幕漫游 + 朝向镜像**：朝随机方向行走不走出屏幕，朝左时视频水平翻转
+- **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分
 - `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`（回 `playbackId`）、
-  `GET /playback/{id}`（播放回执）、`POST /playback/{id}/report`、
+  `GET /playback/{id}`（播放回执）、`POST /playback/{id}/report`、`POST /whisper`、
   `POST /broadcast`、`POST /position`（归一化坐标）、`POST /throw`（抛掷+反弹+摩擦），
   均按 `?pet=` 路由
-- 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim} = {counter, data}`），
+- 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim,facing} = {counter, data}`），
   因此之前写的 [pi 桥接扩展](../../.pi/agent/extensions/dsh-pet.ts) **零改动**直接可用
-- 7 个 HEVC-alpha mov 素材（idle + 6 档工作状态），从 npm 包的 VP9-alpha webm 转出
+- 106 个 HEVC-alpha mov 素材（npm 包 VP9-alpha webm 全量转码）
 
 ## 运行
 
@@ -72,7 +76,8 @@ ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWrit
 
 ## 下一步
 
-- 从 dsh-pet Release `assets-mov` 拉全量真实素材（当前只转了 10 个）
+- 可选增强：余额动画（需余额源）、对话聊天（接 pi 或外部模型）、系统通知
+- 素材入库策略（当前 106 个 mov 约 134MB，可改用 Git LFS 或脚本生成）
 
 ## License
 

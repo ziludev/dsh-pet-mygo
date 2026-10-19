@@ -12,6 +12,14 @@
       cursor: grab;
     }
     #stage.dragging { cursor: grabbing; }
+    #pet { position: absolute; inset: 0; }
+    #pet.squish { animation: squish 0.32s ease; }
+    @keyframes squish {
+      0%   { transform: scale(1, 1); }
+      35%  { transform: scale(0.86, 1.14); }
+      70%  { transform: scale(1.08, 0.92); }
+      100% { transform: scale(1, 1); }
+    }
     video {
       position: absolute; inset: 0; width: 100%; height: 100%;
       opacity: 0; transition: opacity 0.16s ease, transform 0.2s ease;
@@ -44,19 +52,41 @@
       border-top-color: rgba(255, 255, 255, 0.95);
       border-bottom: 0;
     }
+    #menu {
+      position: absolute;
+      display: none;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.22);
+      padding: 4px;
+      max-height: 340px;
+      overflow-y: auto;
+      min-width: 170px;
+      z-index: 10;
+      font: 13px/1.5 -apple-system, "PingFang SC", sans-serif;
+      color: #333;
+    }
+    #menu .mi { padding: 6px 12px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+    #menu .mi:hover { background: #f0f0f0; }
+    #menu .sep { height: 1px; background: #eee; margin: 4px 8px; }
+    #menu .grp { padding: 6px 12px 2px; color: #999; font-size: 12px; }
   </style>
 </head>
 <body>
   <div id="stage">
-    <video id="v0" autoplay muted playsinline></video>
-    <video id="v1" autoplay muted playsinline></video>
+    <div id="pet">
+      <video id="v0" autoplay muted playsinline></video>
+      <video id="v1" autoplay muted playsinline></video>
+    </div>
     <div id="bubble"></div>
+    <div id="menu"></div>
   </div>
   <script>
     const BASE = "http://127.0.0.1:3080/dsh-pet-7340";
     const IDLE = "待机呼吸休闲";
     const FLING_SPEED = 350; // px/s; drag release faster than this becomes a fling
     const stage = document.getElementById("stage");
+    const petEl = document.getElementById("pet");
     const layers = [document.getElementById("v0"), document.getElementById("v1")];
     const bubble = document.getElementById("bubble");
 
@@ -133,18 +163,31 @@
       sayTimer = setTimeout(() => { bubble.style.display = "none"; }, duration || 8000);
     }
 
-    // ---- drag & fling ---------------------------------------------------
+    // ---- click / drag / fling ------------------------------------------
     // Pointer position on screen (CSS px) maps 1:1 to MyGo logical coords,
     // so the window top-left follows screenX/Y minus the grab offset.
+    // A press that moves less than CLICK_MOVE_PX is a click, not a drag.
+    const CLICK_MOVE_PX = 5;
     let dragging = false;
+    let moved = false;
+    let downX = 0, downY = 0;
     let grabX = 0, grabY = 0;   // pointer offset within the window at grab
     let velX = 0, velY = 0;     // low-passed release velocity, px/s
     let lastX = 0, lastY = 0, lastT = 0;
     let pendingX = null, pendingY = null, rafQueued = false;
 
+    function squish() {
+      petEl.classList.remove("squish");
+      void petEl.offsetWidth; // reflow to restart the animation
+      petEl.classList.add("squish");
+    }
+
     function onDown(e) {
+      if (e.button !== 0) return; // left button only; right button is the menu
       dragging = true;
+      moved = false;
       stage.classList.add("dragging");
+      downX = e.screenX; downY = e.screenY;
       grabX = e.clientX;
       grabY = e.clientY;
       lastX = e.screenX; lastY = e.screenY; lastT = performance.now();
@@ -154,6 +197,9 @@
 
     function onMove(e) {
       if (!dragging) return;
+      if (!moved && Math.hypot(e.screenX - downX, e.screenY - downY) > CLICK_MOVE_PX) {
+        moved = true;
+      }
       const now = performance.now();
       if (now - lastT > 0) {
         const dt = now - lastT;
@@ -185,6 +231,12 @@
       if (stage.hasPointerCapture(e.pointerId)) {
         stage.releasePointerCapture(e.pointerId);
       }
+      if (!moved) {
+        // A click: squish the pet and play a click-response animation.
+        squish();
+        mygo.call("Pet.Click");
+        return;
+      }
       if (Math.hypot(velX, velY) > FLING_SPEED) {
         mygo.call("Pet.Fling", velX, velY);
       }
@@ -202,6 +254,67 @@
     } catch (e) {
       say("bridge 异常: " + e, 6000);
     }
+
+    // ---- right-click menu ----------------------------------------------
+    const menu = document.getElementById("menu");
+    let animPools = null; // cached from /config
+
+    async function loadPools() {
+      if (animPools) return animPools;
+      try {
+        const r = await fetch(BASE + "/config", { cache: "no-store" });
+        const c = await r.json();
+        animPools = (c.main && c.main.animations) || {};
+      } catch (e) {
+        animPools = { idle: [IDLE] };
+      }
+      return animPools;
+    }
+
+    function pointPlay(name) {
+      fetch(BASE + "/anim?pet=" + petId, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      }).catch(() => {});
+    }
+
+    function menuItem(label, onClick) {
+      const el = document.createElement("div");
+      el.className = "mi";
+      el.textContent = label;
+      el.onclick = () => { hideMenu(); onClick(); };
+      return el;
+    }
+
+    function showMenu(x, y) {
+      menu.innerHTML = "";
+      menu.appendChild(menuItem("清空气泡", () => { bubble.style.display = "none"; }));
+      menu.appendChild(menuItem("回到初始位置", () => { mygo.call("Pet.Home"); }));
+      const sep = () => { const d = document.createElement("div"); d.className = "sep"; menu.appendChild(d); };
+      const grp = (label) => { const d = document.createElement("div"); d.className = "grp"; d.textContent = label; menu.appendChild(d); };
+      sep();
+      const p = animPools || { idle: [IDLE] };
+      const groups = [["待机", p.idle], ["转向", p.turn], ["移动", p.moves], ["点击回应", p.clicks], ["动作", p.actions]];
+      for (const [label, items] of groups) {
+        if (!items || !items.length) continue;
+        grp(label);
+        for (const name of items) menu.appendChild(menuItem(name, () => pointPlay(name)));
+      }
+      menu.style.display = "block";
+      menu.style.left = Math.min(x, stage.clientWidth - menu.offsetWidth - 8) + "px";
+      menu.style.top = Math.min(y, stage.clientHeight - menu.offsetHeight - 8) + "px";
+    }
+
+    function hideMenu() { menu.style.display = "none"; }
+
+    stage.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      loadPools().then(() => showMenu(e.clientX, e.clientY));
+    });
+    stage.addEventListener("pointerdown", (e) => {
+      if (menu.style.display === "block" && !menu.contains(e.target)) hideMenu();
+    });
 
     // ---- state polling -----------------------------------------------
     let lastAnimCounter = -1;

@@ -12,6 +12,8 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ const (
 	idleAnim   = "待机呼吸休闲"
 	windowW    = 640
 	windowH    = 360
+	animDir    = "resources/anim"
 )
 
 // workStatusAnims is the animation pool for the six work-status tiers, in the
@@ -38,6 +41,43 @@ var workStatusAnims = []string{
 
 // roamAnims are the walk animations played while the pet roams across screen.
 var roamAnims = []string{"螃蟹走路", "原地漂浮踏步", "原地左转奔跑"}
+
+// clickAnims play when the pet is clicked (random pick).
+var clickAnims = []string{
+	"点击回应-开心跃动",
+	"点击回应-害羞惊讶",
+	"点击回应-傲娇生气",
+	"点击回应-挠痒咯咯笑",
+	"点击回应-元气挥手",
+}
+
+// whisperAnims play while the pet mutters to itself.
+var whisperAnims = []string{"碎碎念-擦桌碎碎念", "碎碎念-发呆碎碎念", "碎碎念-对屏碎碎念"}
+
+// whisperLines are the built-in fallback when no model provider is configured:
+// the pet picks one at random, so it still talks without an LLM.
+var whisperLines = []string{
+	"主人记得喝水~",
+	"今天也要加油哦~",
+	"先歇一小会儿嘛~",
+	"肚子有点饿了…",
+	"代码写完了吗？",
+	"要不要休息一下眼睛~",
+	"我在旁边陪着你呢~",
+	"好像快下班啦~",
+	"今天天气不错的样子~",
+	"数到三就起来活动下~",
+}
+
+// Animation-chain weights, matching dsh-pet's config.jsonc defaults:
+// idle 10 + turn 5 + move 5 + categories 80 = 100.
+const (
+	weightIdle = 10
+	weightTurn = 5
+	weightMove = 5
+)
+
+const animPlaySec = 6 // how long a chain animation plays before the next pick
 
 // petConfig lists the pets to spawn; each gets its own window.
 type petConfig struct {
@@ -96,6 +136,7 @@ type server struct {
 	winPet    map[*mygo.Window]string // window -> pet id
 	dragGen   map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
 	playbacks map[string]*playback
+	petHome   map[string][2]int // pet id -> initial (x, y)
 }
 
 func newServer() *server {
@@ -105,10 +146,12 @@ func newServer() *server {
 		winPet:    map[*mygo.Window]string{},
 		dragGen:   map[*mygo.Window]int64{},
 		playbacks: map[string]*playback{},
+		petHome:   map[string][2]int{},
 	}
 }
 
-// addWindow registers a window for a pet and seeds its state.
+// addWindow registers a window for a pet, seeds its state, and remembers its
+// home position.
 func (s *server) addWindow(id string, w *mygo.Window) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -117,6 +160,8 @@ func (s *server) addWindow(id string, w *mygo.Window) {
 	if s.pets[id] == nil {
 		s.pets[id] = newPetState()
 	}
+	x, y := w.Position()
+	s.petHome[id] = [2]int{x, y}
 }
 
 func (s *server) windowFor(id string) *mygo.Window {
@@ -199,14 +244,19 @@ func (s *server) state() fullState {
 	}
 }
 
-// config returns the animation pool under dsh-pet's config shape, so the pi
-// bridge extension's loadWorkAnims() reads a real pool instead of its fallback.
+// config returns the animation pools under dsh-pet's config shape, so the pi
+// bridge extension's loadWorkAnims() reads a real pool and the right-click menu
+// can list animations by category.
 func (s *server) config() map[string]any {
 	return map[string]any{
 		"main": map[string]any{
 			"animations": map[string]any{
-				"idle":   []string{idleAnim},
-				"events": map[string]any{"workStatus": workStatusAnims},
+				"idle":    []string{idleAnim},
+				"turn":    []string{"东张西望"},
+				"moves":   roamAnims,
+				"clicks":  clickAnims,
+				"actions": s.actionPool(),
+				"events":  map[string]any{"workStatus": workStatusAnims},
 			},
 		},
 	}
@@ -364,6 +414,145 @@ func (s *server) autoRoam(id string) {
 	}
 }
 
+// animName returns the pet's current animation name.
+func (s *server) animName(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.pets[id]; p != nil {
+		if m, ok := p.Anim.Data.(map[string]any); ok {
+			if n, ok := m["name"].(string); ok {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
+// toggleFacing flips the pet's facing after a turn animation.
+func (s *server) toggleFacing(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pets[id]
+	if p == nil {
+		return
+	}
+	cur := "right"
+	if f, ok := p.Facing.Data.(string); ok {
+		cur = f
+	}
+	next := "left"
+	if cur == "left" {
+		next = "right"
+	}
+	p.Facing = field{Counter: time.Now().UnixMilli(), Data: next}
+	log.Printf("facing %s -> %s (turn)", id, next)
+}
+
+// isChainExcluded reports whether an animation is reserved for events or
+// interactions and should not appear in the random action pool.
+func isChainExcluded(name string) bool {
+	for _, p := range []string{"点击回应-", "工作状态-", "碎碎念-", "余额-"} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	switch name {
+	case idleAnim, "东张西望", "被鼠标拖拽悬空反馈", "螃蟹走路", "原地漂浮踏步", "原地左转奔跑":
+		return true
+	}
+	return false
+}
+
+var (
+	actionPoolOnce  sync.Once
+	actionPoolCache []string
+)
+
+// actionPool is the set of random-action animations, scanned once from the
+// assets dir minus the reserved idle/turn/move/clicks/events ones.
+func (s *server) actionPool() []string {
+	actionPoolOnce.Do(func() {
+		entries, err := os.ReadDir(animDir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasSuffix(name, ".mov") {
+				continue
+			}
+			base := strings.TrimSuffix(name, ".mov")
+			if isChainExcluded(base) {
+				continue
+			}
+			actionPoolCache = append(actionPoolCache, base)
+		}
+	})
+	return actionPoolCache
+}
+
+// pickNext chooses the next chain animation by weight: idle / turn / move /
+// random action.
+func (s *server) pickNext() (kind, name string) {
+	r := rand.Intn(100)
+	switch {
+	case r < weightIdle:
+		return "idle", idleAnim
+	case r < weightIdle+weightTurn:
+		return "turn", "东张西望"
+	case r < weightIdle+weightTurn+weightMove:
+		return "move", roamAnims[rand.Intn(len(roamAnims))]
+	default:
+		pool := s.actionPool()
+		if len(pool) == 0 {
+			return "idle", idleAnim
+		}
+		return "action", pool[rand.Intn(len(pool))]
+	}
+}
+
+// animChain drives the idle-loop animation chain: when the pet is idle it picks
+// the next animation by weight, plays it, then returns to idle. Event and
+// interaction animations set the state out from under it, so it only advances
+// when its own animation is still the current one.
+func (s *server) animChain(id string) {
+	for {
+		kind, name := s.pickNext()
+		log.Printf("chain %s -> %s %s", id, kind, name)
+		if kind == "move" {
+			s.roam(id)
+			continue
+		}
+		s.setAnim(id, name)
+		time.Sleep(animPlaySec * time.Second)
+		if kind == "turn" {
+			s.toggleFacing(id)
+		}
+		// Only return to idle if no event animation replaced ours meanwhile.
+		if s.animName(id) == name {
+			s.setAnim(id, idleAnim)
+		}
+	}
+}
+
+// whisper has the pet mutter a line with a whisper animation. No model provider
+// is wired up yet, so it uses the built-in line pool (a structured degradation,
+// not an error).
+func (s *server) whisper(id string) {
+	line := whisperLines[rand.Intn(len(whisperLines))]
+	anim := whisperAnims[rand.Intn(len(whisperAnims))]
+	s.setAnim(id, anim)
+	s.setSay(id, line, 6000)
+}
+
+// whisperLoop periodically makes the pet mutter to itself.
+func (s *server) whisperLoop(id string) {
+	for {
+		time.Sleep(time.Duration(60+rand.Intn(60)) * time.Second)
+		s.whisper(id)
+	}
+}
+
 // Pet is the service bound to each page via mygo.Bind. Bridge methods take the
 // calling window from the context, so each pet's page moves its own window.
 type Pet struct{ server *server }
@@ -382,11 +571,35 @@ func (p *Pet) WhoAmI(ctx context.Context) string {
 	return "main"
 }
 
+// Click plays a random click-response animation; the page calls it on a short
+// press (as opposed to a drag).
+func (p *Pet) Click(ctx context.Context) {
+	w := mygo.CallerWindow(ctx)
+	p.server.mu.Lock()
+	id := p.server.winPet[w]
+	p.server.mu.Unlock()
+	if id == "" {
+		id = "main"
+	}
+	p.server.setAnim(id, clickAnims[rand.Intn(len(clickAnims))])
+}
+
 // MoveTo moves the calling window's top-left corner to a screen position.
 func (p *Pet) MoveTo(ctx context.Context, x, y int) {
 	w := mygo.CallerWindow(ctx)
 	p.server.beginMove(w)
 	w.SetPosition(x, y)
+}
+
+// Home moves the calling window back to its spawn position.
+func (p *Pet) Home(ctx context.Context) {
+	w := mygo.CallerWindow(ctx)
+	p.server.mu.Lock()
+	id := p.server.winPet[w]
+	home := p.server.petHome[id]
+	p.server.mu.Unlock()
+	p.server.beginMove(w)
+	w.SetPosition(home[0], home[1])
 }
 
 // Fling throws the calling window with an initial velocity (px/s), from a drag
@@ -484,6 +697,15 @@ func (s *server) handler() http.Handler {
 		jsonReply(w, map[string]bool{"ok": true})
 	}))
 
+	mux.HandleFunc("/dsh-pet-7340/whisper", cors(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		s.whisper(petOf(r))
+		jsonReply(w, map[string]bool{"ok": true})
+	}))
+
 	mux.HandleFunc("/dsh-pet-7340/broadcast", cors(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Text     string `json:"text"`
@@ -566,7 +788,8 @@ func main() {
 			if err := win.Page().LoadFile("resources/index.html"); err != nil {
 				log.Fatalf("load pet page: %v", err)
 			}
-			go s.autoRoam(pc.ID)
+			go s.animChain(pc.ID)
+			go s.whisperLoop(pc.ID)
 		}
 	})
 	if err := mygo.App.Run(); err != nil {
