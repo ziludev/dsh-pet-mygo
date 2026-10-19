@@ -813,6 +813,11 @@ func (s *server) handler() http.Handler {
 }
 
 func main() {
+	// A desktop pet is a floating accessory, not a normal app: hide the Dock
+	// icon (and the folder placeholder a raw binary gets) with the accessory
+	// activation policy. Windows still show.
+	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
+
 	s := newServer()
 	mygo.Bind(&Pet{server: s})
 	go func() {
