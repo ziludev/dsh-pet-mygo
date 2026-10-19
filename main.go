@@ -337,6 +337,14 @@ func (s *server) beginMove(w *mygo.Window) int64 {
 }
 
 // move places a pet's window at normalized coordinates (0..1) over the primary
+// workAreaFor returns the work area of the display the window is on, so a pet
+// placed on a secondary monitor roams and bounces within that screen.
+func (s *server) workAreaFor(w *mygo.Window) mygo.Rectangle {
+	x, y := w.Position()
+	d := mygo.Screen.DisplayMatching(mygo.Rectangle{X: x, Y: y, Width: windowW, Height: windowH})
+	return d.WorkArea
+}
+
 // display's work area.
 func (s *server) move(id string, x, y float64) {
 	win := s.windowFor(id)
@@ -344,7 +352,7 @@ func (s *server) move(id string, x, y float64) {
 		return
 	}
 	s.beginMove(win)
-	wa := mygo.Screen.PrimaryDisplay().WorkArea
+	wa := s.workAreaFor(win)
 	nx := float64(wa.X) + x*float64(wa.Width-windowW)
 	ny := float64(wa.Y) + y*float64(wa.Height-windowH)
 	win.SetPosition(int(nx), int(ny))
@@ -353,7 +361,7 @@ func (s *server) move(id string, x, y float64) {
 // fling moves a window under an initial velocity (px/s), bouncing off work-area
 // edges with friction until it rests or a manual move cancels it.
 func (s *server) fling(win *mygo.Window, vx, vy float64) {
-	wa := mygo.Screen.PrimaryDisplay().WorkArea
+	wa := s.workAreaFor(win)
 	gen := s.beginMove(win)
 
 	x, y := win.Position()
@@ -419,7 +427,7 @@ func (s *server) roam(id string) {
 	if win == nil {
 		return
 	}
-	wa := mygo.Screen.PrimaryDisplay().WorkArea
+	wa := s.workAreaFor(win)
 	x, y := win.Position()
 
 	leftSpace := x - wa.X
@@ -1018,10 +1026,12 @@ func main() {
 	}()
 
 	mygo.App.WhenReady(func() {
-		wa := mygo.Screen.PrimaryDisplay().WorkArea
 		for _, pc := range s.cfg.Pets {
 			pc := pc
-			// Keep a restored position on screen, even if the config was edited.
+			// Clamp a restored position to the display it lands on, even if the
+			// config was edited to an off-screen point.
+			d := mygo.Screen.DisplayMatching(mygo.Rectangle{X: pc.X, Y: pc.Y, Width: windowW, Height: windowH})
+			wa := d.WorkArea
 			pc.X = min(max(pc.X, wa.X), wa.X+wa.Width-windowW)
 			pc.Y = min(max(pc.Y, wa.Y), wa.Y+wa.Height-windowH)
 			win := mygo.NewWindow(mygo.WindowOptions{
