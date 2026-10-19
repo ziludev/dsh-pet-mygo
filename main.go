@@ -517,6 +517,12 @@ func (s *server) pickNext() (kind, name string) {
 // when its own animation is still the current one.
 func (s *server) animChain(id string) {
 	for {
+		time.Sleep(animPlaySec * time.Second)
+		// Only advance the chain when the pet is idle — never interrupt a
+		// user-requested (menu/click) or event animation.
+		if s.animName(id) != idleAnim {
+			continue
+		}
 		kind, name := s.pickNext()
 		log.Printf("chain %s -> %s %s", id, kind, name)
 		if kind == "move" {
