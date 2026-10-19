@@ -22,6 +22,8 @@
 - **右键菜单**：按分类点播动画、清空气泡、回到初始位置
 - **碎碎念**：周期自动弹一句 + 碎碎念动画；无模型时用内置句子池结构化降级
 - **屏幕漫游 + 朝向镜像**：朝随机方向行走不走出屏幕，朝左时视频水平翻转
+- **多显示器**：漫游与抛掷按窗口所在的显示器计算边界（`Screen.DisplayMatching`）
+- **单元测试**：12 个测试覆盖时长解析、动画链权重、契约端点、配置读写（`go test ./...`）
 - **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分
 - `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`（回 `playbackId`）、
   `GET /playback/{id}`（播放回执）、`POST /playback/{id}/report`、`POST /whisper`、
@@ -136,7 +138,8 @@ ffmpeg 解码 webm(VP9-alpha) → BGRA 原始帧 → swift 编码器(AVAssetWrit
 
 ## 下一步
 
-- 可选增强：余额动画（需余额源）、对话聊天（接 pi 或外部模型）、系统通知
+- 可选增强：碎碎念接模型（建议批量预生成句式缓存，避免每句一次调用烧 token）、
+  对话聊天、余额动画、系统通知
 - 素材入库策略（当前 106 个 mov 约 134MB，可改用 Git LFS 或脚本生成）
 
 ## License
