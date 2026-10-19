@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -86,15 +87,64 @@ const (
 
 const animPlaySec = 6 // how long a chain animation plays before the next pick
 
-// petConfig lists the pets to spawn; each gets its own window.
+// petConfig lists a pet to spawn; each gets its own window.
 type petConfig struct {
-	ID string
-	X  int // initial top-left, logical coords
-	Y  int
+	ID string `json:"id"`
+	X  int    `json:"x"` // window top-left, logical screen coords
+	Y  int    `json:"y"`
 }
 
 var defaultPets = []petConfig{
 	{ID: "main", X: 700, Y: 220},
+}
+
+// appConfig is the on-disk user config (~/.config/dsh-pet-mygo/config.json).
+// Edit it (or drag the pet, which persists its position) and restart.
+type appConfig struct {
+	Pets []petConfig `json:"pets"`
+}
+
+// configPath is the user config location; DSH_PET_MYGO_CONFIG overrides it.
+func configPath() string {
+	if p := os.Getenv("DSH_PET_MYGO_CONFIG"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "config.json"
+	}
+	return filepath.Join(home, ".config", "dsh-pet-mygo", "config.json")
+}
+
+// loadConfig reads the user config, falling back to defaults. On first run it
+// writes a default file so the user has something to edit.
+func loadConfig() appConfig {
+	cfg := appConfig{Pets: defaultPets}
+	data, err := os.ReadFile(configPath())
+	if err != nil {
+		saveConfig(cfg)
+		return cfg
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil || len(cfg.Pets) == 0 {
+		log.Printf("config %s invalid, using defaults", configPath())
+		cfg = appConfig{Pets: defaultPets}
+	}
+	return cfg
+}
+
+func saveConfig(cfg appConfig) {
+	path := configPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("config dir: %v", err)
+		return
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Printf("config write: %v", err)
+	}
 }
 
 // field mirrors dsh-pet's state leaf: { counter, data }. The counter is a
@@ -145,6 +195,7 @@ type server struct {
 	playbacks map[string]*playback
 	petHome   map[string][2]int     // pet id -> initial (x, y)
 	menuOpen  map[*mygo.Window]bool // right-click menu open per window
+	cfg       appConfig             // loaded user config; positions persisted back
 }
 
 func newServer() *server {
@@ -156,6 +207,7 @@ func newServer() *server {
 		playbacks: map[string]*playback{},
 		petHome:   map[string][2]int{},
 		menuOpen:  map[*mygo.Window]bool{},
+		cfg:       loadConfig(),
 	}
 }
 
@@ -662,6 +714,39 @@ func (s *server) clickThroughLoop(id string) {
 	}
 }
 
+// savePositions writes current window positions back to the config if they
+// changed, so a restart puts each pet where the user left it.
+func (s *server) savePositions() {
+	s.mu.Lock()
+	changed := false
+	for i := range s.cfg.Pets {
+		id := s.cfg.Pets[i].ID
+		if w := s.windows[id]; w != nil {
+			x, y := w.Position()
+			if s.cfg.Pets[i].X != x || s.cfg.Pets[i].Y != y {
+				s.cfg.Pets[i].X = x
+				s.cfg.Pets[i].Y = y
+				changed = true
+			}
+		}
+	}
+	pets := make([]petConfig, len(s.cfg.Pets))
+	copy(pets, s.cfg.Pets)
+	s.mu.Unlock()
+	if changed {
+		saveConfig(appConfig{Pets: pets})
+		log.Printf("persisted pet positions")
+	}
+}
+
+// persistLoop periodically saves window positions so a restart restores them.
+func (s *server) persistLoop() {
+	for {
+		time.Sleep(2 * time.Second)
+		s.savePositions()
+	}
+}
+
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -820,6 +905,7 @@ func main() {
 
 	s := newServer()
 	mygo.Bind(&Pet{server: s})
+	go s.persistLoop()
 	go func() {
 		log.Printf("serving /dsh-pet-7340 on http://%s", listenAddr)
 		if err := http.ListenAndServe(listenAddr, s.handler()); err != nil {
@@ -828,7 +914,7 @@ func main() {
 	}()
 
 	mygo.App.WhenReady(func() {
-		for _, pc := range defaultPets {
+		for _, pc := range s.cfg.Pets {
 			pc := pc
 			win := mygo.NewWindow(mygo.WindowOptions{
 				Title:         "dsh-pet",
@@ -842,6 +928,9 @@ func main() {
 				SkipTaskbar:   true,
 				DisableShadow: true,
 			})
+			// MyGo's create-time X is clamped by AppKit for small values, so
+			// place the window explicitly after creation.
+			win.SetPosition(pc.X, pc.Y)
 			s.addWindow(pc.ID, win)
 			if err := win.Page().LoadFile("resources/index.html"); err != nil {
 				log.Fatalf("load pet page: %v", err)
@@ -850,6 +939,9 @@ func main() {
 			go s.whisperLoop(pc.ID)
 			go s.clickThroughLoop(pc.ID)
 		}
+	})
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		s.savePositions()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

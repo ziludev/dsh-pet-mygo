@@ -87,6 +87,27 @@ curl -s -X POST 'http://127.0.0.1:3080/dsh-pet-7340/broadcast?pet=main' \
   -H 'content-type: application/json' -d '{"text":"宿主骨架跑通啦","duration":6000}'
 ```
 
+## 配置
+
+配置文件：`~/.config/dsh-pet-mygo/config.json`（`DSH_PET_MYGO_CONFIG` 可覆盖路径）。
+
+首次运行自动生成默认配置；拖动 / 漫游 / 抛掷后位置会自动写回（后台每 2 秒检查一次变化），
+重启恢复原位。
+
+```json
+{
+  "pets": [
+    { "id": "main", "x": 700, "y": 220 }
+  ]
+}
+```
+
+- `pets`：每个元素一只宠物、一个独立窗口（`id` 不同即可多开）。
+- `x` / `y`：窗口左上角的逻辑屏幕坐标。
+
+> 注：MyGo 创建窗口时的 `X` 在小于约 221 时会被 AppKit clamp，所以本项目在创建后用
+> `SetPosition` 显式定位，配置里的任意坐标都能生效。
+
 ## 架构
 
 ```
