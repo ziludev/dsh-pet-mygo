@@ -202,6 +202,9 @@
 
     function onDown(e) {
       if (e.button !== 0) return; // left button only; right button is the menu
+      // Clicking the menu must not start a drag: the pointer capture would
+      // steal the click and break the menu item's onclick.
+      if (menu.style.display === "block" && menu.contains(e.target)) return;
       dragging = true;
       moved = false;
       stage.classList.add("dragging");
