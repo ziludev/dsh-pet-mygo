@@ -23,8 +23,8 @@ import (
 const (
 	listenAddr = "127.0.0.1:3080"
 	idleAnim   = "待机呼吸休闲"
-	windowW    = 640
-	windowH    = 360
+	windowW    = 280
+	windowH    = 300
 	animDir    = "resources/anim"
 )
 

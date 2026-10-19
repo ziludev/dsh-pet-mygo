@@ -12,6 +12,14 @@
       cursor: grab;
     }
     #stage.dragging { cursor: grabbing; }
+    /* 640x360 video canvas scaled down so the pet body fills the smaller window */
+    #viewport {
+      position: absolute;
+      left: 0; top: 0;
+      width: 640px;
+      height: 360px;
+      transform-origin: 0 0;
+    }
     #pet { position: absolute; inset: 0; }
     #pet.squish { animation: squish 0.32s ease; }
     @keyframes squish {
@@ -22,7 +30,7 @@
     }
     video {
       position: absolute; inset: 0; width: 100%; height: 100%;
-      opacity: 0; transition: opacity 0.16s ease, transform 0.2s ease;
+      opacity: 0; transition: opacity 0.16s ease;
       pointer-events: none;
     }
     video.visible { opacity: 1; }
@@ -76,9 +84,11 @@
 </head>
 <body>
   <div id="stage">
-    <div id="pet">
-      <video id="v0" autoplay muted playsinline></video>
-      <video id="v1" autoplay muted playsinline></video>
+    <div id="viewport">
+      <div id="pet">
+        <video id="v0" autoplay muted playsinline></video>
+        <video id="v1" autoplay muted playsinline></video>
+      </div>
     </div>
     <div id="bubble"></div>
     <div id="menu"></div>
@@ -88,8 +98,18 @@
     const IDLE = "待机呼吸休闲";
     const FLING_SPEED = 350; // px/s; drag release faster than this becomes a fling
     const stage = document.getElementById("stage");
+    const viewport = document.getElementById("viewport");
     const petEl = document.getElementById("pet");
     const layers = [document.getElementById("v0"), document.getElementById("v1")];
+
+    // The pet's body region within the 640x360 canvas (union across animations).
+    // The window is smaller, so we scale the canvas so the pet fills it.
+    const PET_BBOX = { x: 196, y: 60, w: 252, h: 272 };
+    function fitPet() {
+      const s = Math.min(stage.clientWidth / PET_BBOX.w, stage.clientHeight / PET_BBOX.h);
+      viewport.style.transform = `translate(${-PET_BBOX.x * s}px, ${-PET_BBOX.y * s}px) scale(${s})`;
+    }
+    fitPet();
     const bubble = document.getElementById("bubble");
 
     let active = 0;      // index of the visible layer
@@ -155,7 +175,7 @@
     // Mirror the video when the pet faces left.
     function setFacing(f) {
       const flip = f === "left";
-      layers.forEach((v) => { v.style.transform = flip ? "scaleX(-1)" : ""; });
+      petEl.style.transform = flip ? "scaleX(-1)" : "";
     }
 
     function say(text, duration) {
