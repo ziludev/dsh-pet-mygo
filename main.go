@@ -1,10 +1,11 @@
 // dsh-pet-mygo: a desktop pet that runs without DeepSeek Harness or Electron.
-// A transparent, always-on-top MyGo window plays HEVC-with-alpha .mov assets,
-// driven through dsh-pet's own /dsh-pet-7340 HTTP contract, so the existing
-// pi bridge extension (and any other consumer) keeps working unchanged.
+// A transparent, always-on-top MyGo window per pet plays HEVC-with-alpha .mov
+// assets, driven through dsh-pet's own /dsh-pet-7340 HTTP contract, so the
+// existing pi bridge extension (and any other consumer) keeps working unchanged.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math"
@@ -33,6 +34,18 @@ var workStatusAnims = []string{
 	"工作状态-垂头叹气冒汗",
 }
 
+// petConfig lists the pets to spawn; each gets its own window.
+type petConfig struct {
+	ID string
+	X  int // initial top-left, logical coords
+	Y  int
+}
+
+var defaultPets = []petConfig{
+	{ID: "main", X: 700, Y: 220},
+	{ID: "side", X: 980, Y: 420},
+}
+
 // field mirrors dsh-pet's state leaf: { counter, data }. The counter is a
 // strictly-increasing millisecond timestamp; consumers compare it to detect
 // change, exactly as they do against the real dsh-pet.
@@ -55,8 +68,9 @@ type fullState struct {
 type server struct {
 	mu      sync.Mutex
 	pets    map[string]*petState
-	window  *mygo.Window
-	dragGen int64 // bumped on a manual move, to cancel an in-flight fling
+	windows map[string]*mygo.Window   // pet id -> window
+	winPet  map[*mygo.Window]string   // window -> pet id
+	dragGen map[*mygo.Window]int64    // bumped on manual move, cancels an in-flight fling
 }
 
 func newServer() *server {
@@ -64,19 +78,32 @@ func newServer() *server {
 		Anim: field{Counter: 0, Data: map[string]any{"name": idleAnim}},
 		Say:  field{Counter: 0, Data: nil},
 	}
-	return &server{pets: map[string]*petState{"main": p}}
+	return &server{
+		pets:    map[string]*petState{"main": p},
+		windows: map[string]*mygo.Window{},
+		winPet:  map[*mygo.Window]string{},
+		dragGen: map[*mygo.Window]int64{},
+	}
 }
 
-func (s *server) setWindow(w *mygo.Window) {
+// addWindow registers a window for a pet and seeds its state.
+func (s *server) addWindow(id string, w *mygo.Window) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.window = w
+	s.windows[id] = w
+	s.winPet[w] = id
+	if s.pets[id] == nil {
+		s.pets[id] = &petState{
+			Anim: field{Counter: 0, Data: map[string]any{"name": idleAnim}},
+			Say:  field{Counter: 0, Data: nil},
+		}
+	}
 }
 
-func (s *server) windowPtr() *mygo.Window {
+func (s *server) windowFor(id string) *mygo.Window {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.window
+	return s.windows[id]
 }
 
 func (s *server) pet(id string) *petState {
@@ -140,30 +167,34 @@ func (s *server) config() map[string]any {
 	}
 }
 
-// move places the window at normalized coordinates (0..1) over the primary
+// cancelFlings bumps the window's drag generation so any active fling stops.
+func (s *server) cancelFlings(w *mygo.Window) {
+	s.mu.Lock()
+	s.dragGen[w]++
+	s.mu.Unlock()
+}
+
+// move places a pet's window at normalized coordinates (0..1) over the primary
 // display's work area.
-func (s *server) move(x, y float64) {
-	win := s.windowPtr()
+func (s *server) move(id string, x, y float64) {
+	win := s.windowFor(id)
 	if win == nil {
 		return
 	}
+	s.cancelFlings(win)
 	wa := mygo.Screen.PrimaryDisplay().WorkArea
 	nx := float64(wa.X) + x*float64(wa.Width-windowW)
 	ny := float64(wa.Y) + y*float64(wa.Height-windowH)
 	win.SetPosition(int(nx), int(ny))
 }
 
-// fling moves the window under an initial velocity (px/s), bouncing off
-// work-area edges with friction until it rests or a manual move cancels it.
-func (s *server) fling(vx, vy float64) {
-	win := s.windowPtr()
-	if win == nil {
-		return
-	}
-	s.mu.Lock()
-	gen := s.dragGen
-	s.mu.Unlock()
+// fling moves a window under an initial velocity (px/s), bouncing off work-area
+// edges with friction until it rests or a manual move cancels it.
+func (s *server) fling(win *mygo.Window, vx, vy float64) {
 	wa := mygo.Screen.PrimaryDisplay().WorkArea
+	s.mu.Lock()
+	gen := s.dragGen[win]
+	s.mu.Unlock()
 
 	x, y := win.Position()
 	fx, fy := float64(x), float64(y)
@@ -175,7 +206,7 @@ func (s *server) fling(vx, vy float64) {
 	const dt = 1.0 / 60.0
 	step := func() bool {
 		s.mu.Lock()
-		cancelled := s.dragGen != gen
+		cancelled := s.dragGen[win] != gen
 		s.mu.Unlock()
 		if cancelled {
 			return true
@@ -209,35 +240,47 @@ func (s *server) fling(vx, vy float64) {
 	}
 }
 
-// throw flings by angle (degrees, 0 = right, 90 = down) and power (multiplier).
-func (s *server) throw(power, angleDeg float64) {
+// throw flings a pet by angle (degrees, 0 = right, 90 = down) and power.
+func (s *server) throw(id string, power, angleDeg float64) {
+	win := s.windowFor(id)
+	if win == nil {
+		return
+	}
 	rad := angleDeg * math.Pi / 180
 	speed := power * 2200
-	s.fling(speed*math.Cos(rad), speed*math.Sin(rad))
+	s.fling(win, speed*math.Cos(rad), speed*math.Sin(rad))
 }
 
-// Pet is the service bound to the page via mygo.Bind; the page drives window
-// drag and fling through mygo.call("Pet.MoveTo" / "Pet.Fling").
+// Pet is the service bound to each page via mygo.Bind. Bridge methods take the
+// calling window from the context, so each pet's page moves its own window.
 type Pet struct{ server *server }
 
-// Ping lets the page verify the bridge is wired up.
+// Ping lets a page verify the bridge is wired up.
 func (p *Pet) Ping() string { return "pong" }
 
-// MoveTo moves the window's top-left corner to a screen (logical) position.
-func (p *Pet) MoveTo(x, y int) {
-	s := p.server
-	s.mu.Lock()
-	s.dragGen++
-	s.mu.Unlock()
-	if w := s.windowPtr(); w != nil {
-		w.SetPosition(x, y)
+// WhoAmI returns the pet id of the window that called it.
+func (p *Pet) WhoAmI(ctx context.Context) string {
+	w := mygo.CallerWindow(ctx)
+	p.server.mu.Lock()
+	defer p.server.mu.Unlock()
+	if id, ok := p.server.winPet[w]; ok {
+		return id
 	}
+	return "main"
 }
 
-// Fling throws the window with an initial velocity (px/s), from a drag release.
-func (p *Pet) Fling(vx, vy float64) {
+// MoveTo moves the calling window's top-left corner to a screen position.
+func (p *Pet) MoveTo(ctx context.Context, x, y int) {
+	w := mygo.CallerWindow(ctx)
+	p.server.cancelFlings(w)
+	w.SetPosition(x, y)
+}
+
+// Fling throws the calling window with an initial velocity (px/s), from a drag
+// release.
+func (p *Pet) Fling(ctx context.Context, vx, vy float64) {
 	log.Printf("fling vx=%.0f vy=%.0f", vx, vy)
-	p.server.fling(vx, vy)
+	p.server.fling(mygo.CallerWindow(ctx), vx, vy)
 }
 
 func (s *server) handler() http.Handler {
@@ -328,7 +371,7 @@ func (s *server) handler() http.Handler {
 		}
 		body.X = math.Max(0, math.Min(1, body.X))
 		body.Y = math.Max(0, math.Min(1, body.Y))
-		s.move(body.X, body.Y)
+		s.move(petOf(r), body.X, body.Y)
 		jsonReply(w, map[string]any{"ok": true, "x": body.X, "y": body.Y})
 	}))
 
@@ -343,7 +386,7 @@ func (s *server) handler() http.Handler {
 		if body.Power <= 0 {
 			body.Power = 1
 		}
-		go s.throw(body.Power, body.Angle)
+		go s.throw(petOf(r), body.Power, body.Angle)
 		jsonReply(w, map[string]bool{"ok": true})
 	}))
 
@@ -365,19 +408,24 @@ func main() {
 	}()
 
 	mygo.App.WhenReady(func() {
-		win := mygo.NewWindow(mygo.WindowOptions{
-			Title:         "dsh-pet",
-			Width:         windowW,
-			Height:        windowH,
-			Frameless:     true,
-			Transparent:   true,
-			AlwaysOnTop:   true,
-			SkipTaskbar:   true,
-			DisableShadow: true,
-		})
-		s.setWindow(win)
-		if err := win.Page().LoadFile("resources/index.html"); err != nil {
-			log.Fatalf("load pet page: %v", err)
+		for _, pc := range defaultPets {
+			pc := pc
+			win := mygo.NewWindow(mygo.WindowOptions{
+				Title:         "dsh-pet",
+				Width:         windowW,
+				Height:        windowH,
+				X:             pc.X,
+				Y:             pc.Y,
+				Frameless:     true,
+				Transparent:   true,
+				AlwaysOnTop:   true,
+				SkipTaskbar:   true,
+				DisableShadow: true,
+			})
+			s.addWindow(pc.ID, win)
+			if err := win.Page().LoadFile("resources/index.html"); err != nil {
+				log.Fatalf("load pet page: %v", err)
+			}
 		}
 	})
 	if err := mygo.App.Run(); err != nil {

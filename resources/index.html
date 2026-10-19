@@ -62,6 +62,7 @@
 
     let active = 0;      // index of the visible layer
     let sayTimer = null;
+    let petId = "main";  // resolved from Pet.WhoAmI once the bridge is up
 
     const src = (name) => "anim/" + encodeURIComponent(name) + ".mov";
 
@@ -172,8 +173,9 @@
     stage.addEventListener("pointerup", onUp);
     stage.addEventListener("pointercancel", onUp);
 
-    // Bridge self-check: surface a visible error if the page can't reach Go.
+    // Bridge self-check + resolve our pet id, surfaced if the page can't reach Go.
     try {
+      mygo.call("Pet.WhoAmI").then((id) => { petId = id; });
       mygo.call("Pet.Ping").catch((e) => say("bridge 失败: " + e, 6000));
     } catch (e) {
       say("bridge 异常: " + e, 6000);
@@ -187,7 +189,7 @@
       try {
         const r = await fetch(BASE + "/state", { cache: "no-store" });
         const s = await r.json();
-        const pet = s.pets && s.pets.main;
+        const pet = s.pets && s.pets[petId];
         if (pet) {
           if (pet.anim && pet.anim.data && pet.anim.counter !== lastAnimCounter) {
             lastAnimCounter = pet.anim.counter;
