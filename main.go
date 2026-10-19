@@ -5,10 +5,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -77,6 +79,123 @@ var whisperLines = []string{
 	"好像快下班啦~",
 	"今天天气不错的样子~",
 	"数到三就起来活动下~",
+}
+
+// whispersFile is the on-disk cache produced by -generate-whispers.
+type whispersFile struct {
+	GeneratedAt string   `json:"generatedAt"`
+	Lines       []string `json:"lines"`
+}
+
+func whisperLinesPath() string {
+	return filepath.Join(filepath.Dir(configPath()), "whispers.json")
+}
+
+// loadWhisperLines reads the pre-generated line cache, or nil if absent.
+func loadWhisperLines() []string {
+	data, err := os.ReadFile(whisperLinesPath())
+	if err != nil {
+		return nil
+	}
+	var wf whispersFile
+	if err := json.Unmarshal(data, &wf); err != nil {
+		return nil
+	}
+	return wf.Lines
+}
+
+// llmConfig resolves the chat-completions endpoint: explicit env vars first,
+// then pi's local magpie proxy (available while pi is running).
+func llmConfig() (base, key, model string) {
+	base = os.Getenv("DSH_PET_LLM_BASE")
+	key = os.Getenv("DSH_PET_LLM_KEY")
+	model = os.Getenv("DSH_PET_LLM_MODEL")
+	if base == "" {
+		base = "http://127.0.0.1:3425/v1"
+	}
+	if key == "" {
+		key = "magpie"
+	}
+	if model == "" {
+		model = "group/smart-split"
+	}
+	return base, key, model
+}
+
+// cleanWhisperLines tidies raw model output into short one-liners.
+func cleanWhisperLines(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, "0123456789.、)） -•·")
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, "\"'“”「」『』")
+		if line == "" || len([]rune(line)) > 40 {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// generateWhispers asks the model for a batch of lines and caches them, so the
+// running pet never calls the model itself (a batch costs ~1k tokens and lasts
+// days). Exposed as the -generate-whispers command.
+func generateWhispers(n int) error {
+	base, key, model := llmConfig()
+	prompt := fmt.Sprintf("你是主人桌面上的Q版蓝发小女仆。生成 %d 句碎碎念，每句一行，20字以内，"+
+		"自然随意、温柔俏皮，说人话不啰嗦，不解释你自己，不提AI，不要编号不要引号。", n)
+	body, _ := json.Marshal(map[string]any{
+		"model":       model,
+		"messages":    []map[string]string{{"role": "user", "content": prompt}},
+		"temperature": 0.9,
+		"max_tokens":  1500,
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(base, "/")+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/json")
+	if key != "" {
+		req.Header.Set("authorization", "Bearer "+key)
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("call %s: %w", base, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("llm returned %d", resp.StatusCode)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	if len(out.Choices) == 0 {
+		return errors.New("empty completion")
+	}
+	lines := cleanWhisperLines(out.Choices[0].Message.Content)
+	if len(lines) == 0 {
+		return errors.New("no usable lines in completion")
+	}
+	wf := whispersFile{GeneratedAt: time.Now().Format(time.RFC3339), Lines: lines}
+	raw, _ := json.MarshalIndent(wf, "", "  ")
+	path := whisperLinesPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return err
+	}
+	log.Printf("wrote %d whisper lines to %s", len(lines), path)
+	return nil
 }
 
 // Animation-chain weights, matching dsh-pet's config.jsonc defaults:
@@ -199,6 +318,7 @@ type server struct {
 	menuOpen  map[*mygo.Window]bool // right-click menu open per window
 	cfg       appConfig             // loaded user config; positions persisted back
 	hitBox    map[string][4]int     // pet id -> current animation's opaque bbox
+	lastWhisper string              // last muttered line, to avoid immediate repeats
 }
 
 func newServer() *server {
@@ -696,11 +816,24 @@ func (s *server) animChain(id string) {
 	}
 }
 
-// whisper has the pet mutter a line with a whisper animation. No model provider
-// is wired up yet, so it uses the built-in line pool (a structured degradation,
-// not an error).
+// whisper has the pet mutter a line with a whisper animation. It uses the
+// pre-generated cache if present (see -generate-whispers), else the built-in
+// pool — the running pet never calls a model itself.
 func (s *server) whisper(id string) {
-	line := whisperLines[rand.Intn(len(whisperLines))]
+	lines := whisperLines
+	if custom := loadWhisperLines(); len(custom) > 0 {
+		lines = custom
+	}
+	var line string
+	for i := 0; i < 5; i++ {
+		line = lines[rand.Intn(len(lines))]
+		if line != s.lastWhisper || len(lines) == 1 {
+			break
+		}
+	}
+	s.mu.Lock()
+	s.lastWhisper = line
+	s.mu.Unlock()
 	anim := whisperAnims[rand.Intn(len(whisperAnims))]
 	s.setAnim(id, anim)
 	s.setSay(id, line, 6000)
@@ -1010,6 +1143,16 @@ func (s *server) handler() http.Handler {
 }
 
 func main() {
+	genWhispers := flag.Bool("generate-whispers", false, "generate whisper lines via the configured LLM and exit")
+	whisperCount := flag.Int("whisper-count", 30, "how many whisper lines to generate")
+	flag.Parse()
+	if *genWhispers {
+		if err := generateWhispers(*whisperCount); err != nil {
+			log.Fatalf("generate whispers: %v", err)
+		}
+		return
+	}
+
 	// A desktop pet is a floating accessory, not a normal app: hide the Dock
 	// icon (and the folder placeholder a raw binary gets) with the accessory
 	// activation policy. Windows still show.

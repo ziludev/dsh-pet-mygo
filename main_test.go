@@ -257,3 +257,39 @@ func TestAnimDurationFallback(t *testing.T) {
 		t.Errorf("fallback duration = %.1fs, want %ds", d.Seconds(), animPlaySec)
 	}
 }
+
+func TestCleanWhisperLines(t *testing.T) {
+	raw := "1. 主人记得喝水~\n2、今天也要加油哦\n\n- \"代码写完了吗？\"\n  \n" +
+		"这一行特别特别长超过四十个字所以应该被丢掉AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	got := cleanWhisperLines(raw)
+	want := []string{"主人记得喝水~", "今天也要加油哦", "代码写完了吗？"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines %v, want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoadWhisperLinesMissing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DSH_PET_MYGO_CONFIG", filepath.Join(dir, "config.json"))
+	if got := loadWhisperLines(); got != nil {
+		t.Errorf("missing file should return nil, got %v", got)
+	}
+}
+
+func TestLoadWhisperLinesFromFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DSH_PET_MYGO_CONFIG", filepath.Join(dir, "config.json"))
+	data, _ := json.Marshal(whispersFile{GeneratedAt: "x", Lines: []string{"a", "b"}})
+	if err := os.WriteFile(filepath.Join(dir, "whispers.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := loadWhisperLines()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("got %v, want [a b]", got)
+	}
+}
