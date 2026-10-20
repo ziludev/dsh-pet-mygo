@@ -1009,11 +1009,13 @@ func (s *server) savePositions() {
 			}
 		}
 	}
+	size := s.cfg.Size
 	pets := make([]petConfig, len(s.cfg.Pets))
 	copy(pets, s.cfg.Pets)
 	s.mu.Unlock()
 	if changed {
-		saveConfig(appConfig{Pets: pets})
+		// Preserve Size: writing only Pets would zero it out.
+		saveConfig(appConfig{Size: size, Pets: pets})
 		log.Printf("persisted pet positions")
 	}
 }

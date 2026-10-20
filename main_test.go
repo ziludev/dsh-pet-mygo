@@ -226,12 +226,34 @@ func TestConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DSH_PET_MYGO_CONFIG", filepath.Join(dir, "config.json"))
 
-	want := appConfig{Pets: []petConfig{{ID: "main", X: 123, Y: 45}}}
+	want := appConfig{Size: 0.6, Pets: []petConfig{{ID: "main", X: 123, Y: 45}}}
 	saveConfig(want)
 
 	got := loadConfig()
+	if got.Size != 0.6 {
+		t.Errorf("size = %v, want 0.6 (a zero size would reset to 1)", got.Size)
+	}
 	if len(got.Pets) != 1 || got.Pets[0].ID != "main" || got.Pets[0].X != 123 || got.Pets[0].Y != 45 {
 		t.Fatalf("round trip got %+v", got)
+	}
+}
+
+// TestScaleSurvivesPositionSave guards the bug where savePositions wrote
+// only Pets and silently zeroed Size.
+func TestScaleSurvivesPositionSave(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DSH_PET_MYGO_CONFIG", filepath.Join(dir, "config.json"))
+
+	saveConfig(appConfig{Size: 0.6, Pets: []petConfig{{ID: "main", X: 1, Y: 2}}})
+	// Simulate what savePositions writes: it must carry Size through.
+	saveConfig(appConfig{Size: 0.6, Pets: []petConfig{{ID: "main", X: 300, Y: 400}}})
+
+	got := loadConfig()
+	if got.Size != 0.6 {
+		t.Fatalf("size reset to %v after a position save, want 0.6", got.Size)
+	}
+	if got.Pets[0].X != 300 {
+		t.Fatalf("position not updated: %+v", got.Pets[0])
 	}
 }
 
