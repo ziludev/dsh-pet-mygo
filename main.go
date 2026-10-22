@@ -335,8 +335,22 @@ type playback struct {
 	ID      string `json:"id"`
 	Pet     string `json:"pet"`
 	Name    string `json:"name"`
-	Status  string `json:"status"` // accepted | playing | completed | error
+	Status  string `json:"status"` // queued | accepted | playing | completed | error
 	Counter int64  `json:"counter"`
+}
+
+// animSlot is the animation on screen and when its clip ends. The chain
+// schedules against it, so a clip is never cut in half.
+type animSlot struct {
+	name  string
+	pid   string
+	until time.Time
+}
+
+// pendingAnim is a client-requested animation waiting for the current clip.
+type pendingAnim struct {
+	name       string
+	playbackID string
 }
 
 type server struct {
@@ -346,12 +360,15 @@ type server struct {
 	winPet      map[*mygo.Window]string // window -> pet id
 	dragGen     map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
 	playbacks   map[string]*playback
-	petHome     map[string][2]int     // pet id -> initial (x, y)
-	menuOpen    map[*mygo.Window]bool // right-click menu open per window
-	cfg         appConfig             // loaded user config; positions persisted back
-	hitBox      map[string][4]int     // pet id -> current animation's opaque bbox
-	pageSeen    map[string]time.Time  // pet id -> last heartbeat from the rendering page
-	lastWhisper string                // last muttered line, to avoid immediate repeats
+	petHome     map[string][2]int      // pet id -> initial (x, y)
+	menuOpen    map[*mygo.Window]bool  // right-click menu open per window
+	cfg         appConfig              // loaded user config; positions persisted back
+	hitBox      map[string][4]int      // pet id -> current animation's opaque bbox
+	cur         map[string]animSlot    // pet id -> animation on screen + clip end
+	pending     map[string]pendingAnim // pet id -> requested animation waiting for a free slot
+	lastReq     map[string]bool        // pet id -> last clip played was requested, not random
+	pageSeen    map[string]time.Time   // pet id -> last heartbeat from the rendering page
+	lastWhisper string                 // last muttered line, to avoid immediate repeats
 }
 
 func newServer() *server {
@@ -365,6 +382,9 @@ func newServer() *server {
 		menuOpen:  map[*mygo.Window]bool{},
 		cfg:       loadConfig(),
 		hitBox:    map[string][4]int{},
+		cur:       map[string]animSlot{},
+		pending:   map[string]pendingAnim{},
+		lastReq:   map[string]bool{},
 		pageSeen:  map[string]time.Time{},
 	}
 	applyScale(s.cfg.Size)
@@ -393,18 +413,119 @@ func (s *server) windowFor(id string) *mygo.Window {
 }
 
 func (s *server) setAnim(id, name string) string {
+	return s.setAnimID(id, name, "")
+}
+
+// setAnimID switches the pet's animation, reusing playbackID when the play was
+// queued earlier, and records when the clip ends.
+func (s *server) setAnimID(id, name, playbackID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.setAnimLocked(id, name, playbackID)
+}
+
+// setAnimLocked is setAnimID for callers that already hold s.mu.
+func (s *server) setAnimLocked(id, name, playbackID string) string {
+	pid := playbackID
+	if pid == "" {
+		pid = fmt.Sprintf("pb-%d", time.Now().UnixNano())
+	}
 	p := s.pets[id]
 	if p == nil {
 		p = newPetState()
 		s.pets[id] = p
 	}
-	pid := fmt.Sprintf("pb-%d", time.Now().UnixNano())
-	p.Anim = field{Counter: time.Now().UnixMilli(), Data: map[string]any{"name": name, "playbackId": pid}}
-	s.playbacks[pid] = &playback{ID: pid, Pet: id, Name: name, Status: "accepted", Counter: time.Now().UnixMilli()}
+	now := time.Now()
+	p.Anim = field{Counter: now.UnixMilli(), Data: map[string]any{"name": name, "playbackId": pid}}
+	s.playbacks[pid] = &playback{ID: pid, Pet: id, Name: name, Status: "accepted", Counter: now.UnixMilli()}
+	s.cur[id] = animSlot{name: name, pid: pid, until: now.Add(animDuration(name))}
 	log.Printf("anim %s -> %s (%s)", id, name, pid)
 	return pid
+}
+
+// requestAnim plays a client-requested animation now when the pet is free and
+// queues it behind the current clip otherwise, so requested animations (work
+// status, whispers) don't chop a random one in half.
+func (s *server) requestAnim(id, name string) string {
+	s.mu.Lock()
+	slot := s.cur[id]
+	busy := time.Now().Before(slot.until)
+	// Already on screen (a session status flapping between two tiers): keep the
+	// clip running instead of restarting it, so it doesn't get cut short.
+	if busy && slot.name == name {
+		s.mu.Unlock()
+		return slot.pid
+	}
+	if busy {
+		if p, ok := s.pending[id]; ok && p.name == name {
+			s.mu.Unlock()
+			return p.playbackID
+		}
+	}
+	s.mu.Unlock()
+	if !busy {
+		pid := s.setAnimID(id, name, "")
+		s.markRequestPlayed(id)
+		return pid
+	}
+	pid := fmt.Sprintf("pb-%d", time.Now().UnixNano())
+	s.mu.Lock()
+	s.playbacks[pid] = &playback{ID: pid, Pet: id, Name: name, Status: "queued", Counter: time.Now().UnixMilli()}
+	s.pending[id] = pendingAnim{name: name, playbackID: pid}
+	s.mu.Unlock()
+	log.Printf("anim %s -> %s queued (%s)", id, name, pid)
+	return pid
+}
+
+// markRequestPlayed records that a client-requested clip took the screen.
+func (s *server) markRequestPlayed(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastReq[id] = true
+}
+
+// advance moves the pet to its next animation at a clip boundary: the queued
+// request when it's the request's turn, otherwise a fresh chain pick. Requests
+// and random picks alternate, so a busy session can't crowd out the random pool
+// and the random pool can't ignore the session state. Decision and play happen
+// under one lock, so a request landing on the boundary is never cut in half.
+func (s *server) advance(id string) (kind, name string, played bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, hasPending := s.pending[id]; hasPending && !s.lastReq[id] {
+		delete(s.pending, id)
+		s.lastReq[id] = true
+		s.setAnimLocked(id, p.name, p.playbackID)
+		return "", "", false
+	}
+	if time.Now().Before(s.cur[id].until) {
+		return "", "", false
+	}
+	kind, name = s.pickNext()
+	s.lastReq[id] = false
+	if kind == "move" {
+		// roam drives its own walk animations.
+		return kind, name, true
+	}
+	s.setAnimLocked(id, name, "")
+	return kind, name, true
+}
+
+// waitClip blocks until the clip on screen has played out.
+func (s *server) waitClip(id string) {
+	for {
+		s.mu.Lock()
+		slot := s.cur[id]
+		s.mu.Unlock()
+		left := time.Until(slot.until)
+		if left <= 0 {
+			return
+		}
+		if left > 200*time.Millisecond {
+			left = 200 * time.Millisecond
+		}
+		time.Sleep(left)
+	}
 }
 
 func (s *server) setSay(id, text string, duration int) {
@@ -579,7 +700,7 @@ func (s *server) throw(id string, power, angleDeg float64) {
 // roam walks a pet a short distance in a random direction, probing the work-area
 // edges so it never walks off screen. The walk animation plays while the window
 // slides, then the pet returns to idle.
-func (s *server) roam(id string) {
+func (s *server) roam(id, anim string) {
 	win := s.windowFor(id)
 	if win == nil {
 		return
@@ -617,7 +738,7 @@ func (s *server) roam(id string) {
 		facing = "left"
 	}
 	s.setFacing(id, facing)
-	s.setAnim(id, roamAnims[rand.Intn(len(roamAnims))])
+	s.setAnim(id, anim)
 	gen := s.beginMove(win)
 
 	const moveDur = 2000 * time.Millisecond
@@ -640,22 +761,8 @@ func (s *server) roam(id string) {
 func (s *server) autoRoam(id string) {
 	for {
 		time.Sleep(time.Duration(10+rand.Intn(10)) * time.Second)
-		s.roam(id)
+		s.roam(id, roamAnims[rand.Intn(len(roamAnims))])
 	}
-}
-
-// animName returns the pet's current animation name.
-func (s *server) animName(id string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if p := s.pets[id]; p != nil {
-		if m, ok := p.Anim.Data.(map[string]any); ok {
-			if n, ok := m["name"].(string); ok {
-				return n
-			}
-		}
-	}
-	return ""
 }
 
 // toggleFacing flips the pet's facing after a turn animation.
@@ -821,34 +928,24 @@ func animDuration(name string) time.Duration {
 	return dur
 }
 
-// animChain drives the idle-loop animation chain: the idle animation plays one
-// full cycle, then the next animation is picked by weight and played for its
-// real duration, then the pet returns to idle. Event and interaction animations
-// set the state out from under it, so it waits for idle before advancing and
-// only returns to idle if its own animation is still the current one.
+// animChain cycles the pet through animations: each clip plays its real length
+// and the next one is picked by weight (idle / turn / roam / random action).
+// Requested animations (work status, whispers) wait for the current clip to end
+// instead of cutting it, and are played as soon as the pet is free.
 func (s *server) animChain(id string) {
 	for {
-		// Wait until the pet is idle (a request/event animation plays out).
-		for s.animName(id) != idleAnim {
-			time.Sleep(400 * time.Millisecond)
-		}
-		// One full idle cycle.
-		time.Sleep(animDuration(idleAnim))
-
-		kind, name := s.pickNext()
-		log.Printf("chain %s -> %s %s (%.1fs)", id, kind, name, animDuration(name).Seconds())
-		if kind == "move" {
-			s.roam(id)
+		s.waitClip(id)
+		kind, name, played := s.advance(id)
+		if !played {
 			continue
 		}
-		s.setAnim(id, name)
-		time.Sleep(animDuration(name))
+		log.Printf("chain %s -> %s %s (%.1fs)", id, kind, name, animDuration(name).Seconds())
+		if kind == "move" {
+			s.roam(id, name)
+			continue
+		}
 		if kind == "turn" {
 			s.toggleFacing(id)
-		}
-		// Only return to idle if no event animation replaced ours meanwhile.
-		if s.animName(id) == name {
-			s.setAnim(id, idleAnim)
 		}
 	}
 }
@@ -872,7 +969,7 @@ func (s *server) whisper(id string) {
 	s.lastWhisper = line
 	s.mu.Unlock()
 	anim := whisperAnims[rand.Intn(len(whisperAnims))]
-	s.setAnim(id, anim)
+	s.requestAnim(id, anim)
 	s.setSay(id, line, 6000)
 }
 
@@ -944,6 +1041,9 @@ func (p *Pet) Click(ctx context.Context) {
 		id = "main"
 	}
 	p.server.setAnim(id, clickAnims[rand.Intn(len(clickAnims))])
+	// A click is instant feedback: it preempts the current clip and counts as
+	// the request turn, so the chain gets the next random pick.
+	p.server.markRequestPlayed(id)
 }
 
 // MoveTo moves the calling window's top-left corner to a screen position.
@@ -1124,7 +1224,16 @@ func (s *server) handler() http.Handler {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		pid := s.setAnim(petOf(r), body.Name)
+		id := petOf(r)
+		// now=1 is a manual pick (the right-click menu): play it right away
+		// instead of queueing it behind the current clip.
+		if r.URL.Query().Get("now") == "1" {
+			pid := s.setAnim(id, body.Name)
+			s.markRequestPlayed(id)
+			jsonReply(w, map[string]any{"ok": true, "playbackId": pid})
+			return
+		}
+		pid := s.requestAnim(id, body.Name)
 		jsonReply(w, map[string]any{"ok": true, "playbackId": pid})
 	}))
 

@@ -351,7 +351,8 @@
     }
 
     function pointPlay(name) {
-      fetch(BASE + "/anim?pet=" + petId, {
+      // now=1: a manual pick from this menu should play at once, not queue.
+      fetch(BASE + "/anim?pet=" + petId + "&now=1", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name }),

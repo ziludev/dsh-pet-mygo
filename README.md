@@ -13,8 +13,11 @@
 
 - 透明、无边框、置顶、无阴影窗口，播放真实宠物动画（蓝毛小女仆）
 - **双缓冲 `<video>` 交叉淡入**：切换动画无闪黑
-- **动画链**：idle 播完按权重（idle 10 / turn 5 / move 5 / 动作 80）自动选下一个，
+- **动画链**：按权重（idle 10 / turn 5 / move 5 / 动作 80）连续自动选下一个，
   每个动画按其真实时长播完再切（解析 mov 的 `mvhd`），turn 翻转朝向、move 漫游、动作从 80+ 池随机
+- **请求动画排队**：`POST /anim` / 碎碎念这类请求在当前片段播完后才接上（不切半截），
+  所以工作状态不会把随机动画挤成只剩固定几个；点击回应则立刻抢占
+- **页面自愈**：渲染进程死掉时自动 reload（`OnRenderProcessGone` + 页面 30s 心跳看门狗）
 - **拖拽 / 甩抛**：按住拖动窗口跟随，松手速度快则抛掷（反弹+摩擦），慢则原地放下
 - **点击穿透 + 动态命中**：透明区域不拦截鼠标（不遮挡下层窗口），命中区按当前动画的透明像素
   实时计算（`Pet.SetHitBox`），跳跃/举手等超出默认区域的姿势也能拖、能点
@@ -27,7 +30,7 @@
 - **单元测试**：12 个测试覆盖时长解析、动画链权重、契约端点、配置读写（`go test ./...`）
 - **多宠物 / 多窗口**：每只宠物独立窗口、独立状态与气泡，bridge 用 `CallerWindow` 区分
 - `/dsh-pet-7340` 契约端点：`GET /state`、`GET /config`、`POST /anim`（回 `playbackId`）、
-  `GET /playback/{id}`（播放回执）、`POST /playback/{id}/report`、`POST /whisper`、
+  `GET /playback/{id}`（播放回执，状态含 `queued`）、`POST /playback/{id}/report`、`POST /whisper`、
   `POST /broadcast`、`POST /position`（归一化坐标）、`POST /throw`（抛掷+反弹+摩擦），
   均按 `?pet=` 路由
 - 状态结构与 dsh-pet 一致（`pets.<id>.{say,anim,facing} = {counter, data}`），
