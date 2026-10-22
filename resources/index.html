@@ -407,7 +407,9 @@
 
     async function poll() {
       try {
-        const r = await fetch(BASE + "/state", { cache: "no-store" });
+        // page=1 is the heartbeat the host watches: if it stops arriving the
+        // host reloads this page (the web content process may have died).
+        const r = await fetch(BASE + "/state?pet=" + petId + "&page=1", { cache: "no-store" });
         const s = await r.json();
         const pet = s.pets && s.pets[petId];
         if (pet) {

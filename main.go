@@ -340,17 +340,18 @@ type playback struct {
 }
 
 type server struct {
-	mu        sync.Mutex
-	pets      map[string]*petState
-	windows   map[string]*mygo.Window // pet id -> window
-	winPet    map[*mygo.Window]string // window -> pet id
-	dragGen   map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
-	playbacks map[string]*playback
-	petHome   map[string][2]int     // pet id -> initial (x, y)
-	menuOpen  map[*mygo.Window]bool // right-click menu open per window
-	cfg       appConfig             // loaded user config; positions persisted back
-	hitBox    map[string][4]int     // pet id -> current animation's opaque bbox
-	lastWhisper string              // last muttered line, to avoid immediate repeats
+	mu          sync.Mutex
+	pets        map[string]*petState
+	windows     map[string]*mygo.Window // pet id -> window
+	winPet      map[*mygo.Window]string // window -> pet id
+	dragGen     map[*mygo.Window]int64  // bumped on manual move, cancels an in-flight fling
+	playbacks   map[string]*playback
+	petHome     map[string][2]int     // pet id -> initial (x, y)
+	menuOpen    map[*mygo.Window]bool // right-click menu open per window
+	cfg         appConfig             // loaded user config; positions persisted back
+	hitBox      map[string][4]int     // pet id -> current animation's opaque bbox
+	pageSeen    map[string]time.Time  // pet id -> last heartbeat from the rendering page
+	lastWhisper string                // last muttered line, to avoid immediate repeats
 }
 
 func newServer() *server {
@@ -364,6 +365,7 @@ func newServer() *server {
 		menuOpen:  map[*mygo.Window]bool{},
 		cfg:       loadConfig(),
 		hitBox:    map[string][4]int{},
+		pageSeen:  map[string]time.Time{},
 	}
 	applyScale(s.cfg.Size)
 	return s
@@ -376,6 +378,7 @@ func (s *server) addWindow(id string, w *mygo.Window) {
 	defer s.mu.Unlock()
 	s.windows[id] = w
 	s.winPet[w] = id
+	s.pageSeen[id] = time.Now()
 	if s.pets[id] == nil {
 		s.pets[id] = newPetState()
 	}
@@ -873,6 +876,37 @@ func (s *server) whisper(id string) {
 	s.setSay(id, line, 6000)
 }
 
+// markPageAlive records that a pet's page is still running. The page calls
+// /state every 400ms with page=1, so silence means its WKWebView content
+// process is gone or wedged.
+func (s *server) markPageAlive(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pageSeen[id] = time.Now()
+}
+
+// pageWatchdog reloads a pet's page when it stops heartbeating. A WKWebView
+// whose content process is killed paints nothing and never recovers on its own,
+// which looks exactly like the pet vanished; a reload respawns the process.
+func (s *server) pageWatchdog(id string) {
+	const stale = 30 * time.Second
+	for {
+		time.Sleep(5 * time.Second)
+		s.mu.Lock()
+		seen := s.pageSeen[id]
+		win := s.windows[id]
+		s.mu.Unlock()
+		if win == nil || time.Since(seen) < stale {
+			continue
+		}
+		log.Printf("page %s silent for %s, reloading", id, time.Since(seen).Round(time.Second))
+		// Reset the heartbeat so a page that fails to come back is retried
+		// every stale interval instead of reloading in a tight loop.
+		s.markPageAlive(id)
+		win.Page().Reload()
+	}
+}
+
 // whisperLoop periodically makes the pet mutter to itself.
 func (s *server) whisperLoop(id string) {
 	for {
@@ -1067,6 +1101,11 @@ func (s *server) handler() http.Handler {
 	}
 
 	mux.HandleFunc("/dsh-pet-7340/state", cors(func(w http.ResponseWriter, r *http.Request) {
+		// Only the rendering page sets page=1; bridge clients poll without it,
+		// so they can't mask a dead page.
+		if r.URL.Query().Get("page") == "1" {
+			s.markPageAlive(petOf(r))
+		}
 		jsonReply(w, s.state())
 	}))
 
@@ -1232,9 +1271,17 @@ func main() {
 			if err := win.Page().LoadFile("resources/index.html"); err != nil {
 				log.Fatalf("load pet page: %v", err)
 			}
+			// MyGo reports a dead web content process but leaves the window blank,
+			// so reload it: that respawns the process and restores rendering.
+			win.Page().OnRenderProcessGone(func(reason string) {
+				log.Printf("page %s web content gone (%s), reloading", pc.ID, reason)
+				s.markPageAlive(pc.ID)
+				go win.Page().Reload()
+			})
 			go s.animChain(pc.ID)
 			go s.whisperLoop(pc.ID)
 			go s.clickThroughLoop(pc.ID)
+			go s.pageWatchdog(pc.ID)
 		}
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
