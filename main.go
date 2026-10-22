@@ -368,24 +368,26 @@ type server struct {
 	pending     map[string]pendingAnim // pet id -> requested animation waiting for a free slot
 	lastReq     map[string]bool        // pet id -> last clip played was requested, not random
 	pageSeen    map[string]time.Time   // pet id -> last heartbeat from the rendering page
+	lastReload  map[string]time.Time   // pet id -> last page reload, to debounce recovery
 	lastWhisper string                 // last muttered line, to avoid immediate repeats
 }
 
 func newServer() *server {
 	s := &server{
-		pets:      map[string]*petState{"main": newPetState()},
-		windows:   map[string]*mygo.Window{},
-		winPet:    map[*mygo.Window]string{},
-		dragGen:   map[*mygo.Window]int64{},
-		playbacks: map[string]*playback{},
-		petHome:   map[string][2]int{},
-		menuOpen:  map[*mygo.Window]bool{},
-		cfg:       loadConfig(),
-		hitBox:    map[string][4]int{},
-		cur:       map[string]animSlot{},
-		pending:   map[string]pendingAnim{},
-		lastReq:   map[string]bool{},
-		pageSeen:  map[string]time.Time{},
+		pets:       map[string]*petState{"main": newPetState()},
+		windows:    map[string]*mygo.Window{},
+		winPet:     map[*mygo.Window]string{},
+		dragGen:    map[*mygo.Window]int64{},
+		playbacks:  map[string]*playback{},
+		petHome:    map[string][2]int{},
+		menuOpen:   map[*mygo.Window]bool{},
+		cfg:        loadConfig(),
+		hitBox:     map[string][4]int{},
+		cur:        map[string]animSlot{},
+		pending:    map[string]pendingAnim{},
+		lastReq:    map[string]bool{},
+		pageSeen:   map[string]time.Time{},
+		lastReload: map[string]time.Time{},
 	}
 	applyScale(s.cfg.Size)
 	return s
@@ -985,6 +987,25 @@ func (s *server) markPageAlive(id string) {
 // pageWatchdog reloads a pet's page when it stops heartbeating. A WKWebView
 // whose content process is killed paints nothing and never recovers on its own,
 // which looks exactly like the pet vanished; a reload respawns the process.
+// reloadPage reloads a pet's page, at most once every few seconds. Recovering
+// from a dead content process can report more than one termination, and a
+// reload storm only keeps the window blank for longer.
+func (s *server) reloadPage(id string, win *mygo.Window) {
+	s.mu.Lock()
+	if time.Since(s.lastReload[id]) < 3*time.Second {
+		s.mu.Unlock()
+		return
+	}
+	s.lastReload[id] = time.Now()
+	s.mu.Unlock()
+	// Never block the caller (the termination callback runs on the main thread):
+	// let the dead process finish tearing down, then respawn it.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		win.Page().Reload()
+	}()
+}
+
 func (s *server) pageWatchdog(id string) {
 	const stale = 30 * time.Second
 	for {
@@ -1000,7 +1021,7 @@ func (s *server) pageWatchdog(id string) {
 		// Reset the heartbeat so a page that fails to come back is retried
 		// every stale interval instead of reloading in a tight loop.
 		s.markPageAlive(id)
-		win.Page().Reload()
+		s.reloadPage(id, win)
 	}
 }
 
@@ -1385,7 +1406,7 @@ func main() {
 			win.Page().OnRenderProcessGone(func(reason string) {
 				log.Printf("page %s web content gone (%s), reloading", pc.ID, reason)
 				s.markPageAlive(pc.ID)
-				go win.Page().Reload()
+				s.reloadPage(pc.ID, win)
 			})
 			go s.animChain(pc.ID)
 			go s.whisperLoop(pc.ID)

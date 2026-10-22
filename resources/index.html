@@ -182,7 +182,29 @@
       hbTimer = setInterval(() => updateHitBox(layers[active]), 180);
     }
 
+    // playGen is bumped on every play() call, so a load that a newer animation
+    // superseded can't flip visibility later (that blanked the window for a
+    // moment: the winning layer had no decoded frame yet).
+    let playGen = 0;
+
+    // firstFrame resolves once the incoming video has a frame to show, so the
+    // cross-fade never exposes an empty layer. Capped so a slow decode can't
+    // stall the switch.
+    function firstFrame(v) {
+      return new Promise((resolve) => {
+        let done = false;
+        const fin = () => { if (!done) { done = true; resolve(); } };
+        const cap = setTimeout(fin, 300);
+        if (v.requestVideoFrameCallback) {
+          v.requestVideoFrameCallback(() => { clearTimeout(cap); fin(); });
+        } else {
+          requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(cap); fin(); }));
+        }
+      });
+    }
+
     function play(name, playbackId) {
+      const gen = ++playGen;
       const next = 1 - active;
       const inV = layers[next], outV = layers[active];
       if (playbackId) currentPlayback = playbackId;
@@ -198,7 +220,9 @@
       inV.dataset.name = name;
       inV.loop = name === IDLE;
       inV.src = src(name);
-      inV.play().then(() => {
+      inV.play().then(async () => {
+        await firstFrame(inV);
+        if (gen !== playGen) return; // a newer animation already took over
         report(playbackId, "playing");
         inV.classList.add("visible");
         outV.classList.remove("visible");
@@ -220,11 +244,15 @@
       }).catch(() => {});
     }
 
-    // Event animations run once, then fall back to the idle loop.
+    // A finished clip holds its last frame while the host picks the next one
+    // (the chain advances at the clip end). Only fall back to the idle loop if
+    // the host stays quiet, and never interrupt a newer animation.
     layers.forEach((el) => el.addEventListener("ended", () => {
+      if (el !== layers[active]) return; // a superseded layer finishing late
       report(currentPlayback, "completed");
       currentPlayback = null;
-      play(IDLE);
+      const gen = playGen;
+      setTimeout(() => { if (gen === playGen) play(IDLE); }, 1200);
     }));
     // Mirror the video when the pet faces left.
     function setFacing(f) {
